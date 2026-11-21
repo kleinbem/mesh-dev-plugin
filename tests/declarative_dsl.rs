@@ -242,7 +242,7 @@ async fn declarative_plugin_macro_exercises_all_arms_and_reproduces_http_tool_le
     assert_eq!(manifest.endpoints.len(), 1);
     assert_eq!(manifest.http_bindings.len(), 2);
 
-    // WORKAROUND(mesh-llm-plugin): CONFIRMED UPSTREAM BUG #1 (tracking: kleinbem/mesh-dev-plugin#4):
+    // WORKAROUND(mesh-llm-plugin): CONFIRMED UPSTREAM BUG #1 (upstream: Mesh-LLM/mesh-llm#3190):
     // `dsl.rs::HttpRouteBuilder::handle` creates synthetic `http_get__ping` / `http_post__echo`
     // operations (note: `trim_matches('_')` even strips the leading `__`!) and adds them to
     // BOTH `manifest.operations` AND `OperationRouter`, leaking stapled HTTP routes into MCP
