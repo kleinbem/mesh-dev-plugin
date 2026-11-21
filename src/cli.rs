@@ -62,6 +62,27 @@ pub enum Command {
         #[arg(long, value_enum, default_value_t = GpuProbeMode::Auto)]
         gpu_probe: GpuProbeMode,
     },
+    /// Execute one or more declarative TOML E2E test suites against a real `mesh-llm` binary.
+    TestSuite {
+        /// Paths to `.toml` suite files.
+        #[arg(required = true)]
+        suites: Vec<std::path::PathBuf>,
+        /// Path or command name of the `mesh-llm` binary to test against.
+        #[arg(long, env = "MESH_LLM_BIN", default_value = "mesh-llm")]
+        mesh_llm: String,
+        /// Optional path to a packaged `mesh-dev-*.tar.gz` archive (defaults to invoking the current `mesh-dev` binary directly).
+        #[arg(long)]
+        archive: Option<std::path::PathBuf>,
+        /// Isolated OpenAI HTTP port.
+        #[arg(long, default_value_t = 19337)]
+        port: u16,
+        /// Isolated console/control API port.
+        #[arg(long, default_value_t = 13131)]
+        console_port: u16,
+        /// Isolated mesh P2P bind port.
+        #[arg(long, default_value_t = 17842)]
+        bind_port: u16,
+    },
 }
 
 #[derive(Debug, Clone, clap::Args)]
@@ -137,6 +158,22 @@ pub struct DevArgs {
         default_missing_value = "injected unhealthy on start"
     )]
     pub unhealthy_on_start: Option<String>,
+
+    /// Opt in to declaring `request_transform.v1` (off by default because transforms fail closed on all requests).
+    #[arg(
+        long,
+        env = "MESH_DEV_ENABLE_REQUEST_TRANSFORM",
+        default_value_t = false
+    )]
+    pub enable_request_transform: bool,
+
+    /// Disable advertising the built-in `dev/virtual-echo` virtual model.
+    #[arg(long, env = "MESH_DEV_NO_VIRTUAL_MODEL", default_value_t = false)]
+    pub no_virtual_model: bool,
+
+    /// Explicitly allow running on a public mesh (refused by default to prevent exposing dev fault ops).
+    #[arg(long, env = "MESH_DEV_ALLOW_PUBLIC_MESH", default_value_t = false)]
+    pub allow_public_mesh: bool,
 }
 
 impl Default for DevArgs {
@@ -156,6 +193,9 @@ impl Default for DevArgs {
             init_delay_ms: 0,
             exit_on_start: None,
             unhealthy_on_start: None,
+            enable_request_transform: false,
+            no_virtual_model: false,
+            allow_public_mesh: false,
         }
     }
 }

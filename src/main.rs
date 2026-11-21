@@ -7,8 +7,9 @@ use tracing_subscriber::EnvFilter;
 
 use mesh_dev::cli::{Cli, Command};
 use mesh_dev::mem_probe::probe_memory;
-use mesh_dev::mesh_adapter::{build_app_state, build_manifest, run_mesh_plugin};
+use mesh_dev::mesh_adapter::{build_app_state, build_manifest_with_options, run_mesh_plugin};
 use mesh_dev::server::serve_with_state;
+use mesh_dev::suite::{SuiteRunOptions, run_suites};
 
 fn main() -> Result<()> {
     // Log strictly to stderr so stdout stays clean for Mesh-LLM plugin IPC and CLI JSON output.
@@ -21,8 +22,8 @@ fn main() -> Result<()> {
 
     let cli = Cli::parse();
 
-    if let Some(Command::Manifest { .. }) = cli.command {
-        let manifest = build_manifest("http://127.0.0.1:0/v1");
+    if let Some(Command::Manifest { dev }) = cli.command {
+        let manifest = build_manifest_with_options("http://127.0.0.1:0/v1", "mesh-dev", &dev);
         println!("{}", mesh_llm_plugin::package_manifest_json(&manifest)?);
         return Ok(());
     }
@@ -41,6 +42,23 @@ fn main() -> Result<()> {
 
     let result = rt.block_on(async move {
         match cli.command {
+            Some(Command::TestSuite {
+                suites,
+                mesh_llm,
+                archive,
+                port,
+                console_port,
+                bind_port,
+            }) => {
+                let opts = SuiteRunOptions {
+                    mesh_llm_bin: mesh_llm,
+                    archive,
+                    port,
+                    console_port,
+                    bind_port,
+                };
+                run_suites(&suites, &opts).await
+            }
             Some(Command::Serve { host, port, dev }) => {
                 let state = build_app_state(&dev);
                 let addr = format!("{host}:{port}");

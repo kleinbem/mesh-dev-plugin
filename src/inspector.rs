@@ -20,6 +20,22 @@ pub enum InspectSource {
     Http,
     Observation,
     Exchange,
+    Events,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SideStreamReceipt {
+    pub kind: String,
+    pub sha256: String,
+    pub byte_count: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RuntimeEventRecord {
+    pub timestamp_unix_ms: u64,
+    pub category: String,
+    pub name: String,
+    pub detail: serde_json::Value,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -119,6 +135,8 @@ pub struct ExchangeRecord {
     pub effective_request_wire_digest: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub response_wire_commitment: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub side_streams: Vec<SideStreamReceipt>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -132,6 +150,8 @@ pub struct InspectRecentResponse {
     pub observation: Option<ObservationInspectSlice>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub exchange: Option<Vec<ExchangeRecord>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub events: Option<Vec<RuntimeEventRecord>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -186,7 +206,15 @@ pub struct ExchangeStats {
     pub distinct_exchanges: u64,
     pub buffered_records: usize,
     pub denied_count: u64,
+    pub side_streams_verified: u64,
     pub outcomes: BTreeMap<String, u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RuntimeEventsStats {
+    pub total_events: u64,
+    pub buffered_records: usize,
+    pub by_category: BTreeMap<String, u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -195,6 +223,7 @@ pub struct InspectorStats {
     pub http: HttpStats,
     pub observation: ObservationStats,
     pub exchange: ExchangeStats,
+    pub events: RuntimeEventsStats,
 }
 
 struct HttpBucket {
@@ -274,8 +303,16 @@ struct ExchangeBucket {
     total_events: u64,
     distinct_exchanges: u64,
     denied_count: u64,
+    side_streams_verified: u64,
     outcomes: BTreeMap<String, u64>,
     recent: VecDeque<ExchangeRecord>,
+}
+
+#[derive(Default)]
+struct RuntimeEventsBucket {
+    total_events: u64,
+    by_category: BTreeMap<String, u64>,
+    recent: VecDeque<RuntimeEventRecord>,
 }
 
 struct InspectorInner {
@@ -283,6 +320,7 @@ struct InspectorInner {
     http: HttpBucket,
     observation: ObservationBucket,
     exchange: ExchangeBucket,
+    events: RuntimeEventsBucket,
 }
 
 #[derive(Clone)]
@@ -304,7 +342,61 @@ impl Inspector {
                 http: HttpBucket::default(),
                 observation: ObservationBucket::default(),
                 exchange: ExchangeBucket::default(),
+                events: RuntimeEventsBucket::default(),
             })),
+        }
+    }
+
+    pub fn record_runtime_event(
+        &self,
+        category: impl Into<String>,
+        name: impl Into<String>,
+        detail: serde_json::Value,
+    ) {
+        let Ok(mut guard) = self.inner.lock() else {
+            return;
+        };
+        let cap = guard.capacity;
+        let category = category.into();
+        let ev = &mut guard.events;
+        ev.total_events += 1;
+        *ev.by_category.entry(category.clone()).or_insert(0) += 1;
+        push_bounded(
+            &mut ev.recent,
+            RuntimeEventRecord {
+                timestamp_unix_ms: unix_now_ms(),
+                category,
+                name: name.into(),
+                detail,
+            },
+            cap,
+        );
+    }
+
+    pub fn record_side_stream_receipt(
+        &self,
+        exchange_id: &str,
+        kind: String,
+        sha256: String,
+        byte_count: u64,
+    ) {
+        let Ok(mut guard) = self.inner.lock() else {
+            return;
+        };
+        let ex = &mut guard.exchange;
+        ex.side_streams_verified += 1;
+        let receipt = SideStreamReceipt {
+            kind,
+            sha256,
+            byte_count,
+        };
+        if let Some(existing) = ex
+            .recent
+            .iter_mut()
+            .rev()
+            .find(|r| r.exchange_id == exchange_id)
+        {
+            existing.side_streams.push(receipt);
         }
     }
 
@@ -628,6 +720,7 @@ impl Inspector {
             request_wire_digest: event.request_wire_digest.clone(),
             effective_request_wire_digest: event.effective_request_wire_digest.clone(),
             response_wire_commitment: event.response_wire_commitment.clone(),
+            side_streams: Vec::new(),
         };
         push_bounded(&mut ex.recent, record, cap);
     }
@@ -646,6 +739,7 @@ impl Inspector {
                 http: None,
                 observation: None,
                 exchange: None,
+                events: None,
             };
         };
         let limit = limit.clamp(1, guard.capacity);
@@ -707,6 +801,17 @@ impl Inspector {
                 .collect()
         });
 
+        let events = matches!(source, InspectSource::All | InspectSource::Events).then(|| {
+            guard
+                .events
+                .recent
+                .iter()
+                .rev()
+                .take(limit)
+                .cloned()
+                .collect()
+        });
+
         InspectRecentResponse {
             source,
             capacity: guard.capacity,
@@ -714,6 +819,7 @@ impl Inspector {
             http,
             observation,
             exchange,
+            events,
         }
     }
 
@@ -754,13 +860,20 @@ impl Inspector {
                     distinct_exchanges: 0,
                     buffered_records: 0,
                     denied_count: 0,
+                    side_streams_verified: 0,
                     outcomes: BTreeMap::new(),
+                },
+                events: RuntimeEventsStats {
+                    total_events: 0,
+                    buffered_records: 0,
+                    by_category: BTreeMap::new(),
                 },
             };
         };
         let h = &guard.http;
         let o = &guard.observation;
         let e = &guard.exchange;
+        let ev = &guard.events;
 
         InspectorStats {
             capacity: guard.capacity,
@@ -798,7 +911,13 @@ impl Inspector {
                 distinct_exchanges: e.distinct_exchanges,
                 buffered_records: e.recent.len(),
                 denied_count: e.denied_count,
+                side_streams_verified: e.side_streams_verified,
                 outcomes: e.outcomes.clone(),
+            },
+            events: RuntimeEventsStats {
+                total_events: ev.total_events,
+                buffered_records: ev.recent.len(),
+                by_category: ev.by_category.clone(),
             },
         }
     }
@@ -833,6 +952,9 @@ impl Inspector {
         }
         if matches!(source, InspectSource::All | InspectSource::Exchange) {
             guard.exchange = ExchangeBucket::default();
+        }
+        if matches!(source, InspectSource::All | InspectSource::Events) {
+            guard.events = RuntimeEventsBucket::default();
         }
     }
 }

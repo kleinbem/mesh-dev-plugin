@@ -119,31 +119,57 @@ pub fn content_value_to_string(value: &Value) -> String {
     }
 }
 
-/// Capture request headers into a deterministic map, redacting sensitive auth/cookie values.
+const MAX_CAPTURED_HEADERS: usize = 64;
+const MAX_CAPTURED_HEADER_VALUE_BYTES: usize = 1024;
+
+/// Capture request headers into a deterministic map, redacting sensitive auth/secret/control
+/// headers and bounding header count & value lengths.
 pub fn capture_headers(headers: &HeaderMap) -> BTreeMap<String, String> {
     let mut map = BTreeMap::new();
     for (name, value) in headers {
+        if map.len() >= MAX_CAPTURED_HEADERS {
+            break;
+        }
         let key = name.as_str().to_ascii_lowercase();
         let val = if is_sensitive_header(&key) {
             "<redacted>".to_string()
         } else {
-            value.to_str().unwrap_or("<non-utf8>").to_string()
+            let raw = value.to_str().unwrap_or("<non-utf8>");
+            if raw.len() > MAX_CAPTURED_HEADER_VALUE_BYTES {
+                let end = raw.floor_char_boundary(MAX_CAPTURED_HEADER_VALUE_BYTES);
+                format!("{}...<truncated>", &raw[..end])
+            } else {
+                raw.to_string()
+            }
         };
         map.entry(key)
             .and_modify(|existing: &mut String| {
-                existing.push_str(", ");
-                existing.push_str(&val);
+                if existing != "<redacted>" && existing.len() < MAX_CAPTURED_HEADER_VALUE_BYTES {
+                    existing.push_str(", ");
+                    existing.push_str(&val);
+                }
             })
             .or_insert(val);
     }
     map
 }
 
-fn is_sensitive_header(lower: &str) -> bool {
+/// Mirror `mesh_llm_config::safe_exchange_header` sensitivity rules so secrets, credentials,
+/// and mesh owner/control headers are never echoed or retained in ring buffers.
+pub fn is_sensitive_header(lower: &str) -> bool {
     matches!(
         lower,
         "authorization" | "proxy-authorization" | "cookie" | "set-cookie" | "x-api-key" | "api-key"
-    )
+    ) || lower.contains("token")
+        || lower.contains("secret")
+        || lower.contains("key")
+        || lower.contains("auth")
+        || lower.contains("cookie")
+        || lower.contains("session")
+        || lower.contains("jwt")
+        || lower.starts_with("x-owner-")
+        || lower.starts_with("x-mesh-owner-")
+        || lower.starts_with("x-mesh-control-")
 }
 
 pub fn format_sse_json(payload: &Value) -> String {

@@ -8,7 +8,9 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use mesh_dev::models::ALL_MODELS;
-use mesh_llm_plugin::{LocalStream, PROTOCOL_VERSION, proto, read_envelope, write_envelope};
+use mesh_llm_plugin::{
+    LocalStream, PROTOCOL_VERSION, host_capabilities, proto, read_envelope, write_envelope,
+};
 use serde_json::{Value, json};
 use tokio::io::AsyncReadExt;
 use tokio::net::UnixListener;
@@ -89,6 +91,7 @@ async fn executable_handshake_manifest_health_zero_stdout_and_clean_shutdown() -
         proto::envelope::Payload::InitializeRequest(proto::InitializeRequest {
             host_protocol_version: PROTOCOL_VERSION,
             host_version: "mesh-dev-protocol-test".into(),
+            host_capabilities: vec![host_capabilities::LOCAL_CHANNELS.into()],
             ..Default::default()
         }),
     )
@@ -188,6 +191,7 @@ async fn startup_disabled_flag_returns_startup_disabled() -> Result<()> {
         proto::envelope::Payload::InitializeRequest(proto::InitializeRequest {
             host_protocol_version: PROTOCOL_VERSION,
             host_version: "mesh-dev-protocol-test".into(),
+            host_capabilities: vec![host_capabilities::LOCAL_CHANNELS.into()],
             ..Default::default()
         }),
     )
@@ -218,6 +222,7 @@ async fn incompatible_host_protocol_returns_startup_disabled() -> Result<()> {
         proto::envelope::Payload::InitializeRequest(proto::InitializeRequest {
             host_protocol_version: PROTOCOL_VERSION + 99,
             host_version: "incompatible-host".into(),
+            host_capabilities: vec![host_capabilities::LOCAL_CHANNELS.into()],
             ..Default::default()
         }),
     )
@@ -250,6 +255,7 @@ async fn init_delay_ms_delays_initialize_handshake() -> Result<()> {
         proto::envelope::Payload::InitializeRequest(proto::InitializeRequest {
             host_protocol_version: PROTOCOL_VERSION,
             host_version: "slow-init-test".into(),
+            host_capabilities: vec![host_capabilities::LOCAL_CHANNELS.into()],
             ..Default::default()
         }),
     )
@@ -282,6 +288,7 @@ async fn inject_health_and_unhealthy_on_start_control_health_responses() -> Resu
         proto::envelope::Payload::InitializeRequest(proto::InitializeRequest {
             host_protocol_version: PROTOCOL_VERSION,
             host_version: "health-fault-test".into(),
+            host_capabilities: vec![host_capabilities::LOCAL_CHANNELS.into()],
             ..Default::default()
         }),
     )
@@ -363,6 +370,7 @@ async fn startup_delay_reports_loading_health_and_env_probe_redacts_secrets() ->
         proto::envelope::Payload::InitializeRequest(proto::InitializeRequest {
             host_protocol_version: PROTOCOL_VERSION,
             host_version: "startup-delay-test".into(),
+            host_capabilities: vec![host_capabilities::LOCAL_CHANNELS.into()],
             ..Default::default()
         }),
     )

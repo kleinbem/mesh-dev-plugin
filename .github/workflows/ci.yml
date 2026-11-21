@@ -42,10 +42,12 @@ jobs:
           root="${stage}/mesh-dev"
           mkdir -p "$root"
           cp target/release/mesh-dev "$root/mesh-dev"
+          ./target/release/mesh-dev manifest > "$root/plugin-manifest.json"
           cp plugin.toml README.md LICENSE "$root/"
           tar czf "${stage}.tar.gz" -C "$stage" mesh-dev
           mkdir -p smoke-extract
           tar xzf "${stage}.tar.gz" -C smoke-extract
           ./smoke-extract/mesh-dev/mesh-dev --help
-          ./smoke-extract/mesh-dev/mesh-dev manifest | grep -q '"openai_exchange_hook"'
+          grep -q '"config_schema"' smoke-extract/mesh-dev/plugin-manifest.json
+          grep -q '"openai_exchange_hook"' smoke-extract/mesh-dev/plugin-manifest.json
           ./smoke-extract/mesh-dev/mesh-dev mem-probe --gpu-probe off | grep -q '"mem_available_kb"'

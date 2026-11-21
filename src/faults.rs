@@ -76,6 +76,58 @@ pub struct ModelOverride {
     pub chunks: Option<u32>,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ExchangePolicyDecision {
+    #[default]
+    Abstain,
+    Allow,
+    Deny,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct ExchangePolicy {
+    #[serde(default)]
+    pub decision: ExchangePolicyDecision,
+    /// When set with `decision == Deny`, deny only requests targeting this model ID.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deny_model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(default)]
+    pub response_headers: Vec<(String, String)>,
+    #[serde(default)]
+    pub annotations: Vec<(String, String)>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TransformMode {
+    #[default]
+    Unchanged,
+    TagSystem,
+    Reject,
+    CorruptModel,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct TransformPolicy {
+    #[serde(default)]
+    pub mode: TransformMode,
+    #[serde(default = "default_transform_tag")]
+    pub tag: String,
+    #[serde(default = "default_transform_reject_reason")]
+    pub reason: String,
+}
+
+fn default_transform_tag() -> String {
+    "[mesh-dev-transformed]".to_string()
+}
+
+fn default_transform_reject_reason() -> String {
+    "rejected by mesh-dev request transform".to_string()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct FaultSnapshot {
     pub health: HealthFaultMode,
@@ -83,6 +135,8 @@ pub struct FaultSnapshot {
     pub loading: bool,
     pub loading_remaining_ms: u64,
     pub model_overrides: BTreeMap<String, ModelOverride>,
+    pub exchange_policy: ExchangePolicy,
+    pub transform_policy: TransformPolicy,
 }
 
 #[derive(Debug, Default)]
@@ -91,6 +145,9 @@ struct InnerFaultState {
     http: HttpFaultMode,
     loading_until: Option<Instant>,
     model_overrides: BTreeMap<String, ModelOverride>,
+    exchange_policy: ExchangePolicy,
+    transform_policy: TransformPolicy,
+    received_settings: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone)]
@@ -132,7 +189,49 @@ impl FaultController {
                 http: HttpFaultMode::Ok,
                 loading_until,
                 model_overrides: BTreeMap::new(),
+                exchange_policy: ExchangePolicy::default(),
+                transform_policy: TransformPolicy::default(),
+                received_settings: None,
             })),
+        }
+    }
+
+    pub fn exchange_policy(&self) -> ExchangePolicy {
+        self.inner
+            .read()
+            .map(|g| g.exchange_policy.clone())
+            .unwrap_or_default()
+    }
+
+    pub fn set_exchange_policy(&self, policy: ExchangePolicy) {
+        if let Ok(mut g) = self.inner.write() {
+            g.exchange_policy = policy;
+        }
+    }
+
+    pub fn transform_policy(&self) -> TransformPolicy {
+        self.inner
+            .read()
+            .map(|g| g.transform_policy.clone())
+            .unwrap_or_default()
+    }
+
+    pub fn set_transform_policy(&self, policy: TransformPolicy) {
+        if let Ok(mut g) = self.inner.write() {
+            g.transform_policy = policy;
+        }
+    }
+
+    pub fn received_settings(&self) -> Option<serde_json::Value> {
+        self.inner
+            .read()
+            .ok()
+            .and_then(|g| g.received_settings.clone())
+    }
+
+    pub fn set_received_settings(&self, settings: Option<serde_json::Value>) {
+        if let Ok(mut g) = self.inner.write() {
+            g.received_settings = settings;
         }
     }
 
@@ -237,6 +336,8 @@ impl FaultController {
             g.http = HttpFaultMode::Ok;
             g.loading_until = None;
             g.model_overrides.clear();
+            g.exchange_policy = ExchangePolicy::default();
+            g.transform_policy = TransformPolicy::default();
         }
     }
 
@@ -250,6 +351,8 @@ impl FaultController {
                 loading: loading_remaining_ms > 0,
                 loading_remaining_ms,
                 model_overrides: g.model_overrides.clone(),
+                exchange_policy: g.exchange_policy.clone(),
+                transform_policy: g.transform_policy.clone(),
             })
             .unwrap_or(FaultSnapshot {
                 health: HealthFaultMode::Ok,
@@ -257,6 +360,8 @@ impl FaultController {
                 loading: false,
                 loading_remaining_ms: 0,
                 model_overrides: BTreeMap::new(),
+                exchange_policy: ExchangePolicy::default(),
+                transform_policy: TransformPolicy::default(),
             })
     }
 }

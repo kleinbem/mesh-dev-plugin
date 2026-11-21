@@ -57,6 +57,7 @@ jobs:
           root="${stable}/mesh-dev"
           mkdir -p "$root"
           cp target/release/mesh-dev "$root/mesh-dev"
+          ./target/release/mesh-dev manifest > "$root/plugin-manifest.json"
           if [ "${{ runner.os }}" = "macOS" ]; then
             codesign --force --sign - "$root/mesh-dev"
             codesign --verify --strict "$root/mesh-dev"
@@ -82,6 +83,7 @@ jobs:
           $root = "$stable\mesh-dev"
           New-Item -ItemType Directory -Force -Path $root | Out-Null
           Copy-Item target\release\mesh-dev.exe "$root\mesh-dev.exe"
+          .\target\release\mesh-dev.exe manifest | Out-File -Encoding utf8NoBOM "$root\plugin-manifest.json"
           Copy-Item plugin.toml "$root\plugin.toml"
           Copy-Item README.md "$root\README.md"
           Copy-Item LICENSE "$root\LICENSE"

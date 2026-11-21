@@ -896,15 +896,20 @@ dependencies = [
  "bytes",
  "clap",
  "futures-util",
+ "hex",
  "mesh-llm-plugin",
+ "rmcp",
  "schemars",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "tokio",
  "tokio-stream",
+ "toml",
  "tracing",
  "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]

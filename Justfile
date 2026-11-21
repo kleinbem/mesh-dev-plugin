@@ -38,6 +38,7 @@ archive target="":
     root="${stage}/mesh-dev"
     mkdir -p "$root"
     cp target/release/mesh-dev "$root/mesh-dev"
+    ./target/release/mesh-dev manifest > "$root/plugin-manifest.json"
     cp plugin.toml README.md LICENSE "$root/"
     stable="${dist}/mesh-dev-${target}.tar.gz"
     versioned="${dist}/mesh-dev-${version}-${target}.tar.gz"
@@ -48,3 +49,7 @@ archive target="":
     rm -rf "$stage"
     echo "Packaged:"
     ls -lh "$dist"
+
+# Run all declarative TOML E2E suites against a real mesh-llm binary
+e2e-suites mesh_llm="mesh-llm":
+    cargo run --locked -- test-suite suites/01-core-inference-and-inspector.toml suites/02-plugin-contract-full.toml suites/03-request-transform.toml suites/04-startup-grace-and-backpressure.toml suites/05-security-boundaries.toml --mesh-llm "{{mesh_llm}}"

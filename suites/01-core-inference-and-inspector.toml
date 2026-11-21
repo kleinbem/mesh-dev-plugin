@@ -1,0 +1,162 @@
+name = "01-core-inference-and-inspector"
+description = "Exercises all dev/* programmable inference models, dynamic parameters, env redaction, fault overrides, and live observation/exchange inspection."
+
+[mesh]
+plugin_args = [
+  "--max-concurrency", "4",
+  "--slow-ttft-ms", "120",
+  "--slow-sse-interval-ms", "20",
+]
+allow_inference_observation = true
+
+[mesh.plugin_env]
+MESH_LLM_MODELS_DIR = "/tmp/mesh-dev-shared-models"
+MESH_LLM_JOIN_TOKEN = "super-secret-token-never-leak"
+
+[mesh.openai_exchange_grant]
+endpoints = ["chat_completions", "completions", "responses"]
+phases = ["request_received", "backend_selected", "exchange_finished"]
+metadata = true
+headers = ["x-mesh-target", "x-mesh-exclude", "x-request-id", "x-mesh-nonce", "x-mesh-dev-nonce"]
+request_body = true
+effective_request_body = true
+response_body = true
+deadline_ms = 500
+max_body_bytes = 1048576
+max_queue_bytes = 4194304
+max_in_flight = 32
+
+[[step]]
+name = "v1-models lists core dev/* and virtual models"
+openai = { method = "GET", path = "/v1/models" }
+expect_status = 200
+expect_contains = [
+  "dev/echo",
+  "dev/mem-probe",
+  "dev/env-probe",
+  "dev/tool-call-edge",
+  "dev/http-503",
+  "dev/http-429",
+  "dev/mid-stream-drop",
+  "dev/malformed-sse",
+  "dev/slow-ttft-15s",
+  "dev/slow-sse-1tps",
+  "dev/virtual-echo",
+]
+
+[[step]]
+name = "dev/echo non-streaming echoes prompt and does not leak Authorization"
+openai = { method = "POST", path = "/v1/chat/completions", headers = { "X-Mesh-Dev-Nonce" = "suite-01-nonce", "Authorization" = "Bearer secret-auth-value" }, body = { model = "dev/echo", messages = [{ role = "user", content = "hello from declarative suite 01" }] } }
+expect_status = 200
+expect_not_contains = ["secret-auth-value"]
+expect_json = { "choices.0.message.content|json.model" = "dev/echo", "choices.0.message.content|json.prompt" = "hello from declarative suite 01", "choices.0.message.content|json.headers.x-mesh-dev-nonce" = "suite-01-nonce" }
+save_json = { instance_id = "choices.0.message.content|json.plugin_instance_id" }
+
+[[step]]
+name = "dev/echo streaming SSE terminates with [DONE]"
+openai = { method = "POST", path = "/v1/chat/completions", body = { model = "dev/echo", stream = true, messages = [{ role = "user", content = "stream echo" }] } }
+expect_status = 200
+expect_contains = ["data:", "[DONE]"]
+
+[[step]]
+name = "dev/slow-ttft-15s honors --slow-ttft-ms override"
+openai = { method = "POST", path = "/v1/chat/completions", body = { model = "dev/slow-ttft-15s", messages = [{ role = "user", content = "ttft test" }] } }
+expect_status = 200
+expect_json = { "choices.0.message.content|json.model" = "dev/slow-ttft-15s" }
+
+[[step]]
+name = "unadvertised dynamic model ID returns 404 model_not_found from mesh-llm exact-match router"
+openai = { method = "POST", path = "/v1/chat/completions", body = { model = "dev/slow-ttft-120ms", messages = [{ role = "user", content = "unadvertised test" }] } }
+expect_status = 404
+expect_contains = ["model_not_found"]
+
+[[step]]
+name = "dev/slow-sse-1tps honors --slow-sse-interval-ms and streams chunks + [DONE]"
+openai = { method = "POST", path = "/v1/chat/completions", body = { model = "dev/slow-sse-1tps", stream = true, max_tokens = 4, messages = [{ role = "user", content = "pace test" }] } }
+expect_status = 200
+expect_contains = ["data:", "[DONE]"]
+
+[[step]]
+name = "dev/mem-probe returns live Linux meminfo and self RSS"
+openai = { method = "POST", path = "/v1/chat/completions", body = { model = "dev/mem-probe", messages = [{ role = "user", content = "probe memory" }] } }
+expect_status = 200
+expect_json = { "choices.0.message.content|json.mem_available_kb" = { gte = 1024 }, "choices.0.message.content|json.self_rss_kb" = { gte = 100 } }
+
+[[step]]
+name = "dev/env-probe exposes allowlisted model cache var and never leaks secrets"
+openai = { method = "POST", path = "/v1/chat/completions", body = { model = "dev/env-probe", messages = [{ role = "user", content = "env check" }] } }
+expect_status = 200
+expect_contains = ["/tmp/mesh-dev-shared-models"]
+expect_not_contains = ["super-secret-token-never-leak"]
+
+[[step]]
+name = "env_probe operation redacts secrets"
+op = "env_probe"
+expect_status = 200
+expect_contains = ["/tmp/mesh-dev-shared-models"]
+expect_not_contains = ["super-secret-token-never-leak"]
+
+[[step]]
+name = "dev/tool-call-edge streams split think and embedded tool_call tags"
+openai = { method = "POST", path = "/v1/chat/completions", body = { model = "dev/tool-call-edge", stream = true, messages = [{ role = "user", content = "edge test" }] } }
+expect_status = 200
+expect_contains = ["tool_calls", "[DONE]"]
+
+[[step]]
+name = "dev/http-503 propagates 5xx failure"
+openai = { method = "POST", path = "/v1/chat/completions", body = { model = "dev/http-503", messages = [{ role = "user", content = "503 test" }] } }
+expect_status_range = [500, 504]
+
+[[step]]
+name = "dev/http-429 propagates 429 or proxy error"
+openai = { method = "POST", path = "/v1/chat/completions", body = { model = "dev/http-429", messages = [{ role = "user", content = "429 test" }] } }
+expect_status_range = [400, 599]
+
+[[step]]
+name = "counted set_model_override forces 1st dev/echo failure then auto-recovers"
+op = "set_model_override"
+input = { model = "dev/echo", behavior = "http503", count = 1 }
+expect_status = 200
+
+[[step]]
+name = "dev/echo fails on overridden request #1"
+openai = { method = "POST", path = "/v1/chat/completions", body = { model = "dev/echo", messages = [{ role = "user", content = "override hit" }] } }
+expect_status_range = [500, 504]
+
+[[step]]
+name = "dev/echo auto-recovers on request #2"
+openai = { method = "POST", path = "/v1/chat/completions", body = { model = "dev/echo", messages = [{ role = "user", content = "recovered" }] } }
+expect_status = 200
+expect_json = { "choices.0.message.content|json.prompt" = "recovered" }
+
+[[step]]
+name = "stats confirms HTTP requests, exchange hook, and sha256-v1 wire side streams"
+op = "stats"
+expect_status = 200
+expect_json = { "inspector.http.total_requests" = { gte = 10 }, "inspector.exchange.distinct_exchanges" = { gte = 5 }, "inspector.observation.status" = "subscribed" }
+
+[[step]]
+name = "UPSTREAM PROBE #3: local_inference_observation.v1 observes plugin endpoints (expected gap)"
+op = "stats"
+expect_status = 200
+expect_json = { "inspector.observation.finished_executions" = { gte = 1 } }
+expect_failure_note = "Confirmed upstream gap in mesh-llm 0.80.0: local_inference_observation.v1 only wires observe_frontend() into native Skippy; plugin-hosted OpenAI endpoints report 0 executions."
+
+[[step]]
+name = "UPSTREAM PROBE #5: unknown /api/... POST on OpenAI ingress returns 404 (expected bug)"
+openai = { method = "POST", path = "/api/plugins/mesh-dev/tools/env_probe", body = {} }
+expect_status = 404
+expect_failure_note = "Confirmed upstream bug in mesh-llm 0.80.0: OpenAI ingress port routes unknown /api/... POSTs to a default plugin inference model instead of returning 404."
+
+[[step]]
+name = "inspect_recent returns bounded records across sources"
+op = "inspect_recent"
+input = { source = "all", limit = 10 }
+expect_status = 200
+expect_json = { "http" = { len_gte = 1 }, "exchange" = { len_gte = 1 } }
+
+[[step]]
+name = "clear empties ring buffers"
+op = "clear"
+expect_status = 200
+expect_json = { "cleared" = true }

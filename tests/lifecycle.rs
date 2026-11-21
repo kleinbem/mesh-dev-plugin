@@ -87,7 +87,13 @@ struct RunningPlugin {
     _dir: tempfile::TempDir,
 }
 
-async fn start_plugin(extra_args: &[&str], host_caps: Vec<String>) -> Result<RunningPlugin> {
+async fn start_plugin(extra_args: &[&str], mut host_caps: Vec<String>) -> Result<RunningPlugin> {
+    if !host_caps
+        .iter()
+        .any(|c| c == host_capabilities::LOCAL_CHANNELS)
+    {
+        host_caps.push(host_capabilities::LOCAL_CHANNELS.into());
+    }
     let dir = tempfile::tempdir()?;
     let socket = dir.path().join("host.sock");
     let listener = UnixListener::bind(&socket)?;

@@ -8,9 +8,13 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::Result;
 use axum::Router;
+use axum::extract::DefaultBodyLimit;
 use axum::routing::{get, post};
 use tokio::net::TcpListener;
 use tokio::sync::{Notify, Semaphore};
+
+/// Maximum accepted HTTP request body size (4 MiB) to protect the `< 5 MB` dev plugin from OOM.
+pub const MAX_HTTP_BODY_BYTES: usize = 4 * 1024 * 1024;
 
 use crate::faults::FaultController;
 use crate::inspector::Inspector;
@@ -82,6 +86,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/v1/chat/completions", post(routes::chat_completions))
         .route("/v1/completions", post(routes::completions))
         .route("/v1/responses", post(routes::responses))
+        .layer(DefaultBodyLimit::max(MAX_HTTP_BODY_BYTES))
         .with_state(state)
 }
 

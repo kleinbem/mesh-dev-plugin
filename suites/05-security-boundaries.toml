@@ -1,0 +1,161 @@
+name = "05-security-boundaries"
+description = "Verifies mesh-llm 0.80.0 plugin security boundaries live: least-privilege capability denial (observation & peer_blocks), credential header stripping, openai_exchange response header spoofing/CRLF/cross-plugin defenses, admission error redaction, and env secret redaction."
+
+[mesh]
+plugin_args = ["--max-concurrency", "4"]
+allow_inference_observation = false
+allow_peer_blocks = false
+
+[mesh.plugin_env]
+MESH_LLM_MODELS_DIR = "/tmp/mesh-dev-sec-models"
+MESH_LLM_JOIN_TOKEN = "sec-join-token-must-never-leak"
+OPENAI_API_KEY = "sk-sec-must-never-leak"
+AWS_SECRET_ACCESS_KEY = "aws-sec-must-never-leak"
+GITHUB_TOKEN = "ghp_sec_must_never_leak"
+
+[mesh.openai_exchange_grant]
+endpoints = ["chat_completions", "completions", "responses"]
+phases = ["request_received", "backend_selected", "exchange_finished"]
+metadata = true
+admission = true
+headers = ["x-mesh-dev-nonce", "x-plugin-6d6573682d646576-hook"]
+request_body = true
+effective_request_body = true
+response_body = true
+deadline_ms = 500
+max_body_bytes = 1048576
+max_queue_bytes = 4194304
+max_in_flight = 32
+
+[[step]]
+name = "allow_inference_observation = false denies host observation feed"
+op = "stats"
+expect_status = 200
+expect_json = { "inspector.observation.status" = "not_granted" }
+
+[[step]]
+name = "allow_peer_blocks = false rejects peer_block operation"
+op = "peer_block"
+input = { action = "block", peer_id = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", length = "seven_days" }
+expect_status_range = [400, 599]
+
+[[step]]
+name = "env_probe never leaks join tokens, API keys, AWS secrets, or GitHub tokens"
+op = "env_probe"
+expect_status = 200
+expect_contains = ["/tmp/mesh-dev-sec-models"]
+expect_not_contains = [
+  "sec-join-token-must-never-leak",
+  "sk-sec-must-never-leak",
+  "aws-sec-must-never-leak",
+  "ghp_sec_must_never_leak",
+]
+
+[[step]]
+name = "OpenAI proxy strips/redacts sensitive credential & control headers before plugin inference"
+openai = { method = "POST", path = "/v1/chat/completions", headers = { "Authorization" = "Bearer proxy-auth-secret", "Cookie" = "session=cookie-secret", "X-Api-Key" = "api-key-secret", "X-Owner-Token" = "owner-token-secret", "X-Mesh-Control-Admin" = "control-secret", "X-Mesh-Dev-Nonce" = "sec-nonce-1" }, body = { model = "dev/echo", messages = [{ role = "user", content = "header isolation test" }] } }
+expect_status = 200
+expect_contains = ["sec-nonce-1"]
+expect_not_contains = [
+  "proxy-auth-secret",
+  "cookie-secret",
+  "api-key-secret",
+  "owner-token-secret",
+  "control-secret",
+]
+
+[[step]]
+name = "exchange hook attempts spoofed Set-Cookie header (must be blocked by host)"
+op = "set_exchange_policy"
+input = { decision = "allow", response_headers = [["set-cookie", "pwned=1"]] }
+expect_status = 200
+
+[[step]]
+name = "spoofed Set-Cookie header never reaches OpenAI client"
+openai = { method = "POST", path = "/v1/chat/completions", body = { model = "dev/echo", messages = [{ role = "user", content = "spoof test 1" }] } }
+expect_status = 200
+expect_absent_headers = ["set-cookie"]
+
+[[step]]
+name = "exchange hook attempts cross-plugin header spoofing x-plugin-<other>-evil"
+op = "set_exchange_policy"
+input = { decision = "allow", response_headers = [["x-plugin-6f74686572-evil", "spoofed-other"]] }
+expect_status = 200
+
+[[step]]
+name = "cross-plugin spoofed header is blocked by host"
+openai = { method = "POST", path = "/v1/chat/completions", body = { model = "dev/echo", messages = [{ role = "user", content = "spoof test 2" }] } }
+expect_status = 200
+expect_absent_headers = ["x-plugin-6f74686572-evil"]
+
+[[step]]
+name = "valid granted x-plugin-<hex>-hook header succeeds (resets circuit breaker)"
+op = "set_exchange_policy"
+input = { decision = "allow", response_headers = [["x-plugin-6d6573682d646576-hook", "verified-sec"]] }
+expect_status = 200
+
+[[step]]
+name = "dev/echo receives valid granted x-plugin-<hex>-hook header"
+openai = { method = "POST", path = "/v1/chat/completions", body = { model = "dev/echo", messages = [{ role = "user", content = "valid header check" }] } }
+expect_status = 200
+expect_headers = { "x-plugin-6d6573682d646576-hook" = "verified-sec" }
+
+[[step]]
+name = "exchange hook attempts un-granted header with valid prefix x-plugin-<hex>-ungranted"
+op = "set_exchange_policy"
+input = { decision = "allow", response_headers = [["x-plugin-6d6573682d646576-ungranted", "nope"]] }
+expect_status = 200
+
+[[step]]
+name = "un-granted response header is rejected by host"
+openai = { method = "POST", path = "/v1/chat/completions", body = { model = "dev/echo", messages = [{ role = "user", content = "ungranted test" }] } }
+expect_status = 200
+expect_absent_headers = ["x-plugin-6d6573682d646576-ungranted"]
+
+[[step]]
+name = "exchange hook attempts CRLF header injection"
+op = "set_exchange_policy"
+input = { decision = "allow", response_headers = [["x-plugin-6d6573682d646576-hook", "ok\r\nX-Injected: evil"]] }
+expect_status = 200
+
+[[step]]
+name = "CRLF header injection is blocked by host"
+openai = { method = "POST", path = "/v1/chat/completions", body = { model = "dev/echo", messages = [{ role = "user", content = "crlf test" }] } }
+expect_status = 200
+expect_absent_headers = ["x-injected", "x-plugin-6d6573682d646576-hook"]
+
+[[step]]
+name = "valid granted header resets hook failure counter before admission deny test"
+op = "set_exchange_policy"
+input = { decision = "allow", response_headers = [["x-plugin-6d6573682d646576-hook", "reset-ok"]] }
+expect_status = 200
+
+[[step]]
+name = "valid granted header delivered after blocked spoof attempts"
+openai = { method = "POST", path = "/v1/chat/completions", body = { model = "dev/echo", messages = [{ role = "user", content = "breaker reset" }] } }
+expect_status = 200
+expect_headers = { "x-plugin-6d6573682d646576-hook" = "reset-ok" }
+
+[[step]]
+name = "admission deny sets untrusted internal reason text"
+op = "set_exchange_policy"
+input = { decision = "deny", reason = "SECRET-INTERNAL-REASON-DO-NOT-REFLECT" }
+expect_status = 200
+
+[[step]]
+name = "admission deny returns 403 permission_denied and never reflects untrusted plugin reason"
+openai = { method = "POST", path = "/v1/chat/completions", body = { model = "dev/echo", messages = [{ role = "user", content = "deny redaction test" }] } }
+expect_status = 403
+expect_contains = ["permission_denied", "OpenAI plugin admission rejected the exchange"]
+expect_not_contains = ["SECRET-INTERNAL-REASON-DO-NOT-REFLECT"]
+
+[[step]]
+name = "reset_faults restores normal inference"
+op = "reset_faults"
+expect_status = 200
+
+[[step]]
+name = "sha256-v1 wire-byte side streams authenticated with CSPRNG UUIDv4 tokens"
+op = "stats"
+expect_status = 200
+expect_json = { "inspector.exchange.side_streams_verified" = { gte = 1 } }
