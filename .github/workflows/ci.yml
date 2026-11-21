@@ -47,4 +47,5 @@ jobs:
           mkdir -p smoke-extract
           tar xzf "${stage}.tar.gz" -C smoke-extract
           ./smoke-extract/mesh-dev/mesh-dev --help
-          ./smoke-extract/mesh-dev/mesh-dev manifest | grep -q '"openai_compatible"'
+          ./smoke-extract/mesh-dev/mesh-dev manifest | grep -q '"openai_exchange_hook"'
+          ./smoke-extract/mesh-dev/mesh-dev mem-probe --gpu-probe off | grep -q '"mem_available_kb"'
