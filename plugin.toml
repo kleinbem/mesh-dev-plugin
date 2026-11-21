@@ -1,0 +1,4 @@
+name = "mesh-dev"
+version = "0.1.0"
+description = "Zero-GPU developer and test plugin for Mesh-LLM: programmable fake OpenAI models, supervision fault injection, and live observation/exchange inspection."
+command = "mesh-dev"
