@@ -242,11 +242,12 @@ async fn declarative_plugin_macro_exercises_all_arms_and_reproduces_http_tool_le
     assert_eq!(manifest.endpoints.len(), 1);
     assert_eq!(manifest.http_bindings.len(), 2);
 
-    // CONFIRMED UPSTREAM BUG #1:
+    // WORKAROUND(mesh-llm-plugin): CONFIRMED UPSTREAM BUG #1 (tracking: kleinbem/mesh-dev-plugin#4):
     // `dsl.rs::HttpRouteBuilder::handle` creates synthetic `http_get__ping` / `http_post__echo`
     // operations (note: `trim_matches('_')` even strips the leading `__`!) and adds them to
     // BOTH `manifest.operations` AND `OperationRouter`, leaking stapled HTTP routes into MCP
-    // `tools/list` and `/api/plugins/<name>/tools`.
+    // `tools/list` and `/api/plugins/<name>/tools`. Flip these assertions once the staged fix
+    // lands upstream and `mesh-llm-plugin` is bumped.
     let op_names: Vec<&str> = manifest
         .operations
         .iter()
@@ -423,9 +424,10 @@ async fn missing_local_channels_capability_returns_invalid_request_before_protoc
     ));
     let mut host = LocalStream::Memory(host_half);
 
-    // Even with an incompatible host_protocol_version, PluginRuntime checks
-    // `host_capabilities::unsupported_requirement` first and returns -32600 (INVALID_REQUEST)
-    // instead of -32010 (STARTUP_DISABLED_ERROR_CODE).
+    // WORKAROUND(mesh-llm-plugin): Even with an incompatible host_protocol_version,
+    // PluginRuntime checks `host_capabilities::unsupported_requirement` first and returns
+    // -32600 (INVALID_REQUEST) instead of -32010 (STARTUP_DISABLED_ERROR_CODE) on v0.80.0
+    // (upstream: Mesh-LLM/mesh-llm#3189). Flip to -32010 once #3189 merges and Cargo.toml bumps.
     let init = exchange(
         &mut host,
         1,

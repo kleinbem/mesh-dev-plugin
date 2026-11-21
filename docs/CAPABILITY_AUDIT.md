@@ -63,6 +63,7 @@ nix develop --command just e2e-suites /path/to/mesh-llm
   `http_get__ping`), appends it to `manifest.operations`, and registers it in `OperationRouter`.
   Neither the host MCP tool discovery nor `GET /api/plugins/<name>/tools` filters out HTTP-only
   bindings, so every stapled HTTP route leaks into LLM `tools/list`.
+- **Tracking**: `tracking: kleinbem/mesh-dev-plugin#4` (prepared fix staged on `kleinbem/mesh-llm@preflight-plugin-dsl-http`)
 - **Reproducer**: `cargo test --test declarative_dsl -- declarative_plugin_macro_exercises_all_arms_and_reproduces_http_tool_leak`
 
 ### Bug #2 — OpenAI ingress port routes unknown `/api/...` POSTs to a random plugin inference model instead of `404`
@@ -80,6 +81,7 @@ nix develop --command just e2e-suites /path/to/mesh-llm
   ```
   Unknown paths on the OpenAI ingress listener should be rejected with `404 Not Found` before
   auto-routing runs.
+- **Upstream**: `tracking: Mesh-LLM/mesh-llm#3186`
 - **Reproducer**: `suites/01-core-inference-and-inspector.toml` Step 18 (`XFAIL`).
 
 ### Bug #3 — `local_inference_observation.v1` does not observe plugin-hosted inference endpoints
@@ -92,6 +94,7 @@ nix develop --command just e2e-suites /path/to/mesh-llm
   to `local_inference_observation.v1`: subscribers succeed (`status = "subscribed"`), yet receive
   `0` execution events and `ready_models = []` even while `openai_exchange.v1` observes every
   request.
+- **Upstream**: `tracking: Mesh-LLM/mesh-llm#3187`
 - **Reproducer**: `suites/01-core-inference-and-inspector.toml` Steps 16–17 (`XFAIL`).
 
 ### Bug #4 — `PluginRuntime::handle_initialize` returns `-32600` (`INVALID_REQUEST`) for missing host capabilities before checking `host_protocol_version`, causing supervisor restart loops
@@ -107,6 +110,7 @@ nix develop --command just e2e-suites /path/to/mesh-llm
   On the host side, `parse_initialize_response` only calls `mark_disabled()` on
   `STARTUP_DISABLED_ERROR_CODE` (`-32010`), treating `-32600` as a crash that triggers supervisor
   restarts even though host capabilities cannot change without upgrading/restarting the host.
+- **Upstream**: `upstream: Mesh-LLM/mesh-llm#3189`
 - **Reproducer**: `cargo test --test declarative_dsl -- missing_local_channels_capability_returns_invalid_request_before_protocol_check`
 
 ---
