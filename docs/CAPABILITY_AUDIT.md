@@ -63,7 +63,7 @@ nix develop --command just e2e-suites /path/to/mesh-llm
   `http_get__ping`), appends it to `manifest.operations`, and registers it in `OperationRouter`.
   Neither the host MCP tool discovery nor `GET /api/plugins/<name>/tools` filters out HTTP-only
   bindings, so every stapled HTTP route leaks into LLM `tools/list`.
-- **Tracking**: `tracking: kleinbem/mesh-dev-plugin#4` (prepared fix staged on `kleinbem/mesh-llm@preflight-plugin-dsl-http`)
+- **Upstream**: `upstream: Mesh-LLM/mesh-llm#3190`
 - **Reproducer**: `cargo test --test declarative_dsl -- declarative_plugin_macro_exercises_all_arms_and_reproduces_http_tool_leak`
 
 ### Bug #2 — OpenAI ingress port routes unknown `/api/...` POSTs to a random plugin inference model instead of `404`
