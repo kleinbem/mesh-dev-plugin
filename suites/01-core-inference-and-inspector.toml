@@ -143,12 +143,12 @@ expect_status = 200
 expect_json = { "inspector.observation.finished_executions" = { gte = 1 } }
 expect_failure_note = "Confirmed upstream gap in mesh-llm 0.80.0 (tracking: Mesh-LLM/mesh-llm#3187): local_inference_observation.v1 only wires observe_frontend() into native Skippy; plugin-hosted OpenAI endpoints report 0 executions."
 
-# WORKAROUND(mesh-llm): XFAIL probe until OpenAI ingress returns 404 on unknown /api/... POSTs (tracking: Mesh-LLM/mesh-llm#3186).
+# WORKAROUND(mesh-llm): XFAIL probe until OpenAI ingress returns 404 on unknown /api/... POSTs (tracking: Mesh-LLM/mesh-llm#3186, upstream: Mesh-LLM/mesh-llm#3197).
 [[step]]
 name = "UPSTREAM PROBE #5: unknown /api/... POST on OpenAI ingress returns 404 (expected bug)"
 openai = { method = "POST", path = "/api/plugins/mesh-dev/tools/env_probe", body = {} }
 expect_status = 404
-expect_failure_note = "Confirmed upstream bug in mesh-llm 0.80.0 (tracking: Mesh-LLM/mesh-llm#3186): OpenAI ingress port routes unknown /api/... POSTs to a default plugin inference model instead of returning 404."
+expect_failure_note = "Confirmed upstream bug in mesh-llm 0.80.0 (tracking: Mesh-LLM/mesh-llm#3186, upstream: Mesh-LLM/mesh-llm#3197): OpenAI ingress port routes unknown /api/... POSTs to a default plugin inference model instead of returning 404."
 
 [[step]]
 name = "inspect_recent returns bounded records across sources"

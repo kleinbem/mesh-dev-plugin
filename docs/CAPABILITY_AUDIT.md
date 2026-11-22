@@ -81,7 +81,7 @@ nix develop --command just e2e-suites /path/to/mesh-llm
   ```
   Unknown paths on the OpenAI ingress listener should be rejected with `404 Not Found` before
   auto-routing runs.
-- **Upstream**: `tracking: Mesh-LLM/mesh-llm#3186`
+- **Upstream**: `tracking: Mesh-LLM/mesh-llm#3186`, `upstream: Mesh-LLM/mesh-llm#3197`
 - **Reproducer**: `suites/01-core-inference-and-inspector.toml` Step 18 (`XFAIL`).
 
 ### Bug #3 — `local_inference_observation.v1` does not observe plugin-hosted inference endpoints
@@ -112,6 +112,30 @@ nix develop --command just e2e-suites /path/to/mesh-llm
   restarts even though host capabilities cannot change without upgrading/restarting the host.
 - **Upstream**: `upstream: Mesh-LLM/mesh-llm#3189`
 - **Reproducer**: `cargo test --test declarative_dsl -- missing_local_channels_capability_returns_invalid_request_before_protocol_check`
+
+### Bug #5 — External/plugin HTTP upstream requests are not cancelled on pre-header client disconnect
+
+- **Severity**: Medium (orphaned upstream generation continues burning GPU/memory after the caller disconnects before TTFT)
+- **Location**: `mesh/crates/mesh-llm-host-runtime/src/network/openai/external_endpoint.rs` (`proxy_http_endpoint_buffered`, `proxy_http_endpoint_streaming`)
+- **Details**:
+  Mid-stream SSE cancellation drops the upstream body stream cleanly, but if a client disconnects
+  before the plugin endpoint sends its HTTP response headers (e.g. during a slow TTFT prefill),
+  the upstream `reqwest` `.send().await` future is not raced against client disconnect and runs
+  to completion.
+- **Upstream**: `upstream: Mesh-LLM/mesh-llm#3194`
+- **Reproducer**: Send a request to `dev/slow-ttft-15s` through `mesh-llm` and drop the client connection after ~1s; verify the upstream request cancels immediately instead of finishing after 15s.
+
+### Bug #6 — Plain-HTTP plugin health probes fail without a system CA bundle and follow proxy settings on loopback
+
+- **Severity**: Medium (breaks plugin discovery completely in Nix sandboxes, minimal containers, and air-gapped hosts without `cacert`, and routes loopback health probes through `HTTP_PROXY`/`ALL_PROXY`)
+- **Location**: `mesh/crates/mesh-llm-host-runtime/src/plugin/health.rs` (`probe_openai_compatible_http_endpoint_for_protocol`)
+- **Details**:
+  `probe_openai_compatible_http_endpoint_for_protocol` builds a default `reqwest::Client`, which
+  fails with `build health probe client: builder error` when no system CA certificates are present
+  and marks every local plain-HTTP plugin endpoint `"unhealthy"` with `0` models. Loopback
+  `http://` probes also honor `HTTP_PROXY`/`ALL_PROXY` instead of talking to loopback directly.
+- **Upstream**: `upstream: Mesh-LLM/mesh-llm#3196`
+- **Reproducer**: Run `mesh-dev test-suite` against `mesh-llm` in a Nix sandbox without `pkgs.cacert` (or with empty `SSL_CERT_FILE`/`SSL_CERT_DIR` and closed `HTTP_PROXY`).
 
 ---
 
