@@ -94,7 +94,7 @@ nix develop --command just e2e-suites /path/to/mesh-llm
   to `local_inference_observation.v1`: subscribers succeed (`status = "subscribed"`), yet receive
   `0` execution events and `ready_models = []` even while `openai_exchange.v1` observes every
   request.
-- **Upstream**: `tracking: Mesh-LLM/mesh-llm#3187`
+- **Upstream**: `tracking: Mesh-LLM/mesh-llm#3187`, `upstream: Mesh-LLM/mesh-llm#3209`
 - **Reproducer**: `suites/01-core-inference-and-inspector.toml` Steps 16–17 (`XFAIL`).
 
 ### Bug #4 — `PluginRuntime::handle_initialize` returns `-32600` (`INVALID_REQUEST`) for missing host capabilities before checking `host_protocol_version`, causing supervisor restart loops
