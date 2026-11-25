@@ -1,0 +1,44 @@
+name = "04-startup-grace-and-backpressure"
+description = "Exercises A/B test targets #1 & #2: --startup-delay-secs loading health grace transition and --max-concurrency 1 synchronous 503 backpressure before SSE headers."
+
+[mesh]
+plugin_args = [
+  "--startup-delay-secs", "2",
+  "--max-concurrency", "1",
+  "--slow-sse-interval-ms", "200",
+]
+skip_initial_model_wait = true
+
+[[step]]
+name = "immediately after boot, status reports loading = true"
+op = "status"
+expect_status = 200
+expect_json = { "faults.loading" = true }
+
+[[step]]
+name = "wait for dev/echo to become advertised after 2s startup delay"
+wait_model = "dev/echo"
+timeout_ms = 15000
+
+[[step]]
+name = "status reports loading = false once startup grace completes"
+op = "status"
+expect_status = 200
+expect_json = { "faults.loading" = false }
+
+[[step]]
+name = "launch slow background SSE stream holding the single concurrency slot"
+openai = { method = "POST", path = "/v1/chat/completions", body = { model = "dev/slow-sse-1tps", stream = true, max_tokens = 12, messages = [{ role = "user", content = "hold slot" }] }, concurrent_background = true }
+timeout_ms = 10000
+
+[[step]]
+name = "2nd concurrent streaming request gets 503 backpressure (never 200 + [DONE])"
+openai = { method = "POST", path = "/v1/chat/completions", body = { model = "dev/echo", stream = true, messages = [{ role = "user", content = "should get 503" }] } }
+expect_status_range = [500, 504]
+expect_not_contains = ["[DONE]"]
+
+[[step]]
+name = "stats records backpressure_503 >= 1"
+op = "stats"
+expect_status = 200
+expect_json = { "inspector.http.backpressure_503" = { gte = 1 } }

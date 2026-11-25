@@ -1,0 +1,5 @@
+# no-link: RUSTSEC-2026-0543 is an informational "chrono is unmaintained" advisory with no security vulnerability; chrono is pulled in transitively by rmcp/mesh-llm-plugin.
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0543"
+ignoreUntil = 2027-05-01
+reason = "Informational unmaintained advisory for chrono (no security vulnerability); transitive dependency of rmcp and mesh-llm-plugin."

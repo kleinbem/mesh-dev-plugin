@@ -1,0 +1,63 @@
+name = "03-request-transform"
+description = "Exercises opt-in request_transform.v1 host-private pre-inference transforms: pass-through, system prompt injection, fail-closed rejection, and host validation of mutated model field."
+
+[mesh]
+plugin_args = ["--enable-request-transform", "--max-concurrency", "4"]
+
+[[step]]
+name = "status confirms request_transform.v1 capability negotiated"
+op = "status"
+expect_status = 200
+expect_json = { "negotiated_capabilities.request_transform" = true }
+
+[[step]]
+name = "unchanged mode passes request cleanly to dev/echo"
+openai = { method = "POST", path = "/v1/chat/completions", body = { model = "dev/echo", messages = [{ role = "user", content = "baseline transform" }] } }
+expect_status = 200
+expect_json = { "choices.0.message.content|json.prompt" = "baseline transform" }
+
+[[step]]
+name = "set_transform_policy tag_system injects system message before inference"
+op = "set_transform_policy"
+input = { mode = "tag_system", tag = "[transformed-by-suite-03]" }
+expect_status = 200
+
+[[step]]
+name = "dev/echo observes injected system message from request_transform.v1"
+openai = { method = "POST", path = "/v1/chat/completions", body = { model = "dev/echo", messages = [{ role = "user", content = "tag check" }] } }
+expect_status = 200
+expect_contains = ["[transformed-by-suite-03]"]
+
+[[step]]
+name = "set_transform_policy reject enforces fail-closed error"
+op = "set_transform_policy"
+input = { mode = "reject", reason = "policy-rejected-suite-03" }
+expect_status = 200
+
+[[step]]
+name = "rejected transform blocks inference request fail-closed"
+openai = { method = "POST", path = "/v1/chat/completions", body = { model = "dev/echo", messages = [{ role = "user", content = "must fail" }] } }
+expect_status_range = [400, 599]
+expect_contains = ["policy-rejected-suite-03"]
+
+[[step]]
+name = "set_transform_policy corrupt_model mutates model field to test host validation"
+op = "set_transform_policy"
+input = { mode = "corrupt_model" }
+expect_status = 200
+
+[[step]]
+name = "host rejects transform that mutates model field"
+openai = { method = "POST", path = "/v1/chat/completions", body = { model = "dev/echo", messages = [{ role = "user", content = "corrupt check" }] } }
+expect_status_range = [400, 599]
+
+[[step]]
+name = "reset_faults restores unchanged mode"
+op = "reset_faults"
+expect_status = 200
+
+[[step]]
+name = "dev/echo succeeds cleanly after reset_faults"
+openai = { method = "POST", path = "/v1/chat/completions", body = { model = "dev/echo", messages = [{ role = "user", content = "after reset" }] } }
+expect_status = 200
+expect_not_contains = ["[transformed-by-suite-03]"]
