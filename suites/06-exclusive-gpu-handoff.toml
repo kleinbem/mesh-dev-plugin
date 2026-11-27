@@ -234,7 +234,7 @@ expect_contains = ['"name":"native-qwen"']
 log_since = "disconnect-fin"
 expect_log_contains = ["downstream client disconnected while waiting for exclusive_gpu handoff"]
 expect_log_not_contains = ["Unloaded local model 'native-qwen'", "inference request attempt started route=chat_completions source=direct_http model=dev/echo"]
-expect_failure_note = "Gap in #3195 at 39f94ba1: wait_for_tcp_disconnect treats an orderly FIN as a half-close, so the handoff still unloads native models and dials the plugin for a client that already left"
+expect_failure_note = "Known limit (#3195): mesh-llm keeps serving write-half-closed clients, so a FIN during the wait is not a disconnect; the handoff still unloads and dials the plugin. Only resets (and QUIC stops) skip it"
 
 [[step]]
 name = "native model is resident for the next case"
@@ -332,7 +332,7 @@ log_mark = "deny"
 name = "plugin request gets the policy response, not a 503"
 openai = { method = "POST", path = "/v1/chat/completions", body = { model = "dev/echo", messages = [{ role = "user", content = "denied" }] } }
 expect_status = 403
-expect_contains = ["permission_denied"]
+expect_contains = ["plugin_policy_denied"]
 expect_not_contains = ["plugin_gpu_handoff_failed"]
 
 [[step]]
