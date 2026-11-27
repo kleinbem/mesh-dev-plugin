@@ -679,6 +679,9 @@ pub fn build_plugin(
                         .and_then(|e| e.model.as_deref())
                         .is_some_and(|m| m == target)
                 });
+                let matches_deny_phase = policy.deny_phase.as_deref().is_none_or(|phase| {
+                    parsed.as_ref().is_some_and(|e| e.phase == phase)
+                });
                 let (decision, reason) = match policy.decision {
                     ExchangePolicyDecision::Abstain => (OpenAiAdmissionDecision::Abstain, None),
                     ExchangePolicyDecision::Allow => {
@@ -689,7 +692,7 @@ pub fn build_plugin(
                         }
                     }
                     ExchangePolicyDecision::Deny => {
-                        if is_pre_dispatch && matches_deny_model {
+                        if is_pre_dispatch && matches_deny_model && matches_deny_phase {
                             (
                                 OpenAiAdmissionDecision::Deny,
                                 Some(

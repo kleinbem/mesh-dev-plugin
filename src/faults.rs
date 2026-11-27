@@ -92,6 +92,10 @@ pub struct ExchangePolicy {
     /// When set with `decision == Deny`, deny only requests targeting this model ID.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deny_model: Option<String>,
+    /// When set with `decision == Deny`, deny only at this phase (`request_received` or
+    /// `backend_selected`); `backend_selected` exercises admission after route selection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deny_phase: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
     #[serde(default)]

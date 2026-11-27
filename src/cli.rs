@@ -82,6 +82,12 @@ pub enum Command {
         /// Isolated mesh P2P bind port.
         #[arg(long, default_value_t = 17842)]
         bind_port: u16,
+        /// Run each suite this many times.
+        #[arg(long, default_value_t = 1)]
+        repeat: u32,
+        /// Copy the mesh-llm log of each failed run into this directory.
+        #[arg(long)]
+        keep_logs: Option<std::path::PathBuf>,
     },
 }
 

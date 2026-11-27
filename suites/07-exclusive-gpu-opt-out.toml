@@ -1,0 +1,33 @@
+name = "07-exclusive-gpu-opt-out"
+description = "Without exclusive_gpu a plugin request leaves the on-demand native model loaded (Mesh-LLM/mesh-llm#3195 default)."
+
+[mesh]
+serve = true
+requires_env = ["MESH_DEV_NATIVE_GGUF"]
+ready_timeout_ms = 180000
+
+[mesh.node_env]
+MESH_LLM_NO_RUNTIME_DOWNLOAD = "1"
+RUST_LOG = "info"
+
+[[mesh.models]]
+model = "native-qwen"
+hardware = { model_path = "${MESH_DEV_NATIVE_GGUF}" }
+lifecycle = { load = "on_demand", idle_timeout_secs = 0 }
+
+[[step]]
+name = "native model loads on first request"
+openai = { method = "POST", path = "/v1/chat/completions", body = { model = "native-qwen", max_tokens = 4, messages = [{ role = "user", content = "hi" }] } }
+timeout_ms = 180000
+expect_status = 200
+
+[[step]]
+name = "plugin request succeeds"
+openai = { method = "POST", path = "/v1/chat/completions", body = { model = "dev/mem-probe-hold-5s", messages = [{ role = "user", content = "plugin" }] } }
+expect_status = 200
+
+[[step]]
+name = "native model is still loaded"
+console_http = { method = "GET", path = "/api/runtime" }
+expect_contains = ['"name":"native-qwen"']
+expect_log_not_contains = ["Unloaded local model 'native-qwen'"]

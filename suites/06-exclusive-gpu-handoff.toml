@@ -1,0 +1,352 @@
+name = "06-exclusive-gpu-handoff"
+description = "exclusive_gpu handoff against a real on-demand native model (Mesh-LLM/mesh-llm#3174, #3195): unload before the plugin runs, native requests wait and reload, plugin requests serialize, pinned models stay, policy denials and client disconnects evict nothing, and owner unloads racing the handoff don't fail it."
+
+# Needs a small GGUF (a regular file, not a symlink) and a mesh-llm with a native runtime:
+#   MESH_DEV_NATIVE_GGUF=$(realpath .../Qwen3-0.6B-Q4_K_M.gguf) mesh-dev test-suite suites/06-*.toml
+[mesh]
+serve = true
+exclusive_gpu = true
+requires_env = ["MESH_DEV_NATIVE_GGUF"]
+ready_timeout_ms = 180000
+# Steps 18-21 keep a native request running while plugin requests queue behind it.
+plugin_args = ["--max-concurrency", "8"]
+
+[mesh.node_env]
+MESH_LLM_NO_RUNTIME_DOWNLOAD = "1"
+RUST_LOG = "info"
+
+[[mesh.models]]
+model = "native-qwen"
+hardware = { model_path = "${MESH_DEV_NATIVE_GGUF}" }
+lifecycle = { load = "on_demand", idle_timeout_secs = 0 }
+
+# Pinned: loads at startup and must never be unloaded by a handoff.
+[[mesh.models]]
+model = "native-pinned"
+hardware = { model_path = "${MESH_DEV_NATIVE_GGUF}" }
+
+[mesh.openai_exchange_grant]
+endpoints = ["chat_completions"]
+phases = ["request_received", "backend_selected", "exchange_finished"]
+metadata = true
+admission = true
+deadline_ms = 500
+max_body_bytes = 1048576
+max_queue_bytes = 4194304
+max_in_flight = 32
+
+# --- Baseline: the original problem ------------------------------------------------
+
+[[step]]
+name = "pinned native model is loaded at startup"
+console_http = { method = "GET", path = "/api/runtime" }
+poll = true
+timeout_ms = 180000
+expect_contains = ['"name":"native-pinned"']
+
+[[step]]
+name = "on-demand native model loads on first request"
+openai = { method = "POST", path = "/v1/chat/completions", body = { model = "native-qwen", max_tokens = 4, messages = [{ role = "user", content = "hi" }] } }
+timeout_ms = 180000
+expect_status = 200
+log_mark = "baseline"
+
+[[step]]
+name = "both native models are resident"
+console_http = { method = "GET", path = "/api/runtime" }
+expect_contains = ['"name":"native-qwen"', '"name":"native-pinned"']
+
+[[step]]
+name = "request to the exclusive_gpu plugin succeeds"
+openai = { method = "POST", path = "/v1/chat/completions", body = { model = "dev/echo", messages = [{ role = "user", content = "plugin after native" }] } }
+expect_status = 200
+
+[[step]]
+name = "on-demand model was unloaded, pinned model stays"
+console_http = { method = "GET", path = "/api/runtime" }
+expect_contains = ['"name":"native-pinned"']
+expect_not_contains = ['"name":"native-qwen"']
+log_since = "baseline"
+expect_log_count = { "Unloaded local model 'native-qwen'" = 1 }
+expect_log_not_contains = ["Unloaded local model 'native-pinned'"]
+
+# --- Native request while the plugin holds the GPU ------------------------------------
+
+[[step]]
+name = "native model reloads after the handoff released"
+openai = { method = "POST", path = "/v1/chat/completions", body = { model = "native-qwen", max_tokens = 4, messages = [{ role = "user", content = "reload" }] } }
+timeout_ms = 180000
+expect_status = 200
+
+[[step]]
+name = "plugin holds the GPU (15s before its first byte)"
+openai = { method = "POST", path = "/v1/chat/completions", body = { model = "dev/slow-ttft-15s", messages = [{ role = "user", content = "hold" }] }, background = "hold" }
+timeout_ms = 60000
+
+[[step]]
+name = "native model is gone while the plugin runs"
+console_http = { method = "GET", path = "/api/runtime" }
+poll = true
+timeout_ms = 5000
+expect_not_contains = ['"name":"native-qwen"']
+log_mark = "during-hold"
+
+[[step]]
+name = "native request during the hold"
+openai = { method = "POST", path = "/v1/chat/completions", body = { model = "native-qwen", max_tokens = 4, messages = [{ role = "user", content = "during hold" }] }, background = "native-during-hold" }
+timeout_ms = 240000
+
+[[step]]
+name = "wait a moment while the plugin still holds"
+sleep_ms = 2000
+
+[[step]]
+name = "native request is still waiting"
+expect_pending = "native-during-hold"
+
+[[step]]
+name = "native model did not reload during the hold"
+console_http = { method = "GET", path = "/api/runtime" }
+expect_not_contains = ['"name":"native-qwen"']
+log_since = "during-hold"
+expect_log_not_contains = ["native_model_loaded model_id=native-qwen"]
+
+[[step]]
+name = "plugin hold finishes"
+await_background = "hold"
+expect_status = 200
+
+[[step]]
+name = "waiting native request reloads and answers"
+await_background = "native-during-hold"
+timeout_ms = 240000
+expect_status = 200
+expect_contains = ['"model":"native-qwen"']
+
+# --- Two plugin requests serialize ----------------------------------------------------
+
+[[step]]
+name = "first plugin request holds 5s"
+openai = { method = "POST", path = "/v1/chat/completions", body = { model = "dev/mem-probe-hold-5s", messages = [{ role = "user", content = "first" }] }, background = "p1" }
+timeout_ms = 60000
+
+[[step]]
+name = "second plugin request"
+openai = { method = "POST", path = "/v1/chat/completions", body = { model = "dev/echo", messages = [{ role = "user", content = "second" }] }, background = "p2" }
+timeout_ms = 60000
+
+[[step]]
+name = "second plugin request waits for the first"
+expect_pending = "p2"
+
+[[step]]
+name = "first plugin request finishes"
+await_background = "p1"
+expect_status = 200
+
+[[step]]
+name = "second plugin request then succeeds"
+await_background = "p2"
+expect_status = 200
+
+# --- Client disconnect while waiting for the handoff (review point 4) -----------------
+# Two variants: a reset (what the PR's unit test uses) and an orderly FIN close (what
+# curl, browsers and most SDKs send when they give up).
+
+[[step]]
+name = "native model loaded again"
+openai = { method = "POST", path = "/v1/chat/completions", body = { model = "native-qwen", max_tokens = 4, messages = [{ role = "user", content = "load" }] } }
+timeout_ms = 180000
+expect_status = 200
+
+[[step]]
+name = "RST: long native request keeps the model busy"
+openai = { method = "POST", path = "/v1/chat/completions", body = { model = "native-qwen", max_tokens = 96, messages = [{ role = "user", content = "Count slowly from one to one hundred." }] }, background = "busy-rst" }
+timeout_ms = 180000
+log_mark = "disconnect-rst"
+
+[[step]]
+name = "RST: plugin request queues behind the native request"
+openai = { method = "POST", path = "/v1/chat/completions", body = { model = "dev/echo", messages = [{ role = "user", content = "will disconnect" }] }, background = "gone-rst", reset_on_drop = true }
+timeout_ms = 180000
+
+[[step]]
+name = "RST: native request is still running"
+expect_pending = "busy-rst"
+
+[[step]]
+name = "RST: client of the queued plugin request resets the connection"
+drop_background = "gone-rst"
+
+[[step]]
+name = "RST: native request finishes normally"
+await_background = "busy-rst"
+timeout_ms = 180000
+expect_status = 200
+
+[[step]]
+name = "RST: disconnect evicted nothing and the plugin was not dialed"
+console_http = { method = "GET", path = "/api/runtime" }
+poll = true
+timeout_ms = 5000
+expect_contains = ['"name":"native-qwen"']
+log_since = "disconnect-rst"
+expect_log_contains = ["downstream client disconnected while waiting for exclusive_gpu handoff"]
+expect_log_not_contains = ["Unloaded local model 'native-qwen'", "inference request attempt started route=chat_completions source=direct_http model=dev/echo"]
+
+[[step]]
+name = "FIN: native model is resident"
+openai = { method = "POST", path = "/v1/chat/completions", body = { model = "native-qwen", max_tokens = 4, messages = [{ role = "user", content = "load" }] } }
+timeout_ms = 180000
+expect_status = 200
+
+[[step]]
+name = "FIN: long native request keeps the model busy"
+openai = { method = "POST", path = "/v1/chat/completions", body = { model = "native-qwen", max_tokens = 96, messages = [{ role = "user", content = "Count slowly from one to one hundred." }] }, background = "busy-fin" }
+timeout_ms = 180000
+log_mark = "disconnect-fin"
+
+[[step]]
+name = "FIN: plugin request queues behind the native request"
+openai = { method = "POST", path = "/v1/chat/completions", body = { model = "dev/echo", messages = [{ role = "user", content = "will disconnect" }] }, background = "gone-fin" }
+timeout_ms = 180000
+
+[[step]]
+name = "FIN: native request is still running"
+expect_pending = "busy-fin"
+
+[[step]]
+name = "FIN: client of the queued plugin request closes the connection"
+drop_background = "gone-fin"
+
+[[step]]
+name = "FIN: native request finishes normally"
+await_background = "busy-fin"
+timeout_ms = 180000
+expect_status = 200
+
+[[step]]
+name = "FIN: disconnect evicted nothing and the plugin was not dialed"
+console_http = { method = "GET", path = "/api/runtime" }
+poll = true
+timeout_ms = 5000
+expect_contains = ['"name":"native-qwen"']
+log_since = "disconnect-fin"
+expect_log_contains = ["downstream client disconnected while waiting for exclusive_gpu handoff"]
+expect_log_not_contains = ["Unloaded local model 'native-qwen'", "inference request attempt started route=chat_completions source=direct_http model=dev/echo"]
+expect_failure_note = "Gap in #3195 at 39f94ba1: wait_for_tcp_disconnect treats an orderly FIN as a half-close, so the handoff still unloads native models and dials the plugin for a client that already left"
+
+[[step]]
+name = "native model is resident for the next case"
+openai = { method = "POST", path = "/v1/chat/completions", body = { model = "native-qwen", max_tokens = 4, messages = [{ role = "user", content = "reload" }] } }
+timeout_ms = 180000
+expect_status = 200
+
+# --- Warm native request selected before a handoff (review point 2) -------------------
+
+[[step]]
+name = "long native request holds the lease"
+openai = { method = "POST", path = "/v1/chat/completions", body = { model = "native-qwen", max_tokens = 48, messages = [{ role = "user", content = "Count slowly from one to fifty." }] }, background = "warm-1" }
+timeout_ms = 240000
+
+[[step]]
+name = "plugin request queues the handoff"
+openai = { method = "POST", path = "/v1/chat/completions", body = { model = "dev/echo", messages = [{ role = "user", content = "queued handoff" }] }, background = "handoff" }
+timeout_ms = 240000
+
+[[step]]
+name = "warm native request arrives behind the queued handoff"
+openai = { method = "POST", path = "/v1/chat/completions", body = { model = "native-qwen", max_tokens = 4, messages = [{ role = "user", content = "warm" }] }, background = "warm-2" }
+timeout_ms = 300000
+
+[[step]]
+name = "first native request finishes"
+await_background = "warm-1"
+timeout_ms = 240000
+expect_status = 200
+
+[[step]]
+name = "plugin request runs after the drain"
+await_background = "handoff"
+timeout_ms = 240000
+expect_status = 200
+
+[[step]]
+name = "warm native request reloads instead of failing on the retired port"
+await_background = "warm-2"
+timeout_ms = 300000
+expect_status = 200
+expect_contains = ['"model":"native-qwen"']
+
+# --- Owner unload racing the handoff (review point 5) ---------------------------------
+
+[[step]]
+name = "native model is resident"
+console_http = { method = "GET", path = "/api/runtime" }
+poll = true
+timeout_ms = 10000
+expect_contains = ['"name":"native-qwen"']
+
+[[step]]
+name = "read the owner-control token"
+read_file = { path = "${NODE_HOME}/.mesh-llm/owner-control-token-v2", var = "owner_token" }
+
+[[step]]
+name = "owner unloads the native model"
+console_http = { method = "DELETE", path = "/api/runtime/models/native-qwen", headers = { Authorization = "Bearer ${owner_token}" }, background = "owner-unload" }
+timeout_ms = 60000
+
+[[step]]
+name = "plugin request races the owner unload and still succeeds"
+openai = { method = "POST", path = "/v1/chat/completions", body = { model = "dev/echo", messages = [{ role = "user", content = "race owner unload" }] } }
+timeout_ms = 60000
+expect_status = 200
+
+[[step]]
+name = "owner unload completes"
+await_background = "owner-unload"
+expect_status_range = [200, 299]
+
+[[step]]
+name = "native model is unloaded and the pinned one stays"
+console_http = { method = "GET", path = "/api/runtime" }
+expect_contains = ['"name":"native-pinned"']
+expect_not_contains = ['"name":"native-qwen"']
+
+# --- Selected-route policy denial (review point 3) ------------------------------------
+
+[[step]]
+name = "native model loaded once more"
+openai = { method = "POST", path = "/v1/chat/completions", body = { model = "native-qwen", max_tokens = 4, messages = [{ role = "user", content = "load" }] } }
+timeout_ms = 180000
+expect_status = 200
+
+[[step]]
+name = "mesh-dev denies dev/echo at backend_selected only"
+op = "set_exchange_policy"
+input = { decision = "deny", deny_model = "dev/echo", deny_phase = "backend_selected", reason = "suite-06 selected-route deny" }
+expect_status = 200
+log_mark = "deny"
+
+[[step]]
+name = "plugin request gets the policy response, not a 503"
+openai = { method = "POST", path = "/v1/chat/completions", body = { model = "dev/echo", messages = [{ role = "user", content = "denied" }] } }
+expect_status = 403
+expect_contains = ["permission_denied"]
+expect_not_contains = ["plugin_gpu_handoff_failed"]
+
+[[step]]
+name = "denied request evicted nothing"
+console_http = { method = "GET", path = "/api/runtime" }
+expect_contains = ['"name":"native-qwen"']
+log_since = "deny"
+expect_log_not_contains = ["Unloaded local model 'native-qwen'"]
+
+[[step]]
+name = "reset the exchange policy"
+op = "reset_faults"
+expect_status = 200
+
+[[step]]
+name = "the pinned model was never unloaded"
+expect_log_not_contains = ["Unloaded local model 'native-pinned'"]

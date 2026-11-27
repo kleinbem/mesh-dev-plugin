@@ -49,6 +49,8 @@ fn main() -> Result<()> {
                 port,
                 console_port,
                 bind_port,
+                repeat,
+                keep_logs,
             }) => {
                 let opts = SuiteRunOptions {
                     mesh_llm_bin: mesh_llm,
@@ -56,6 +58,8 @@ fn main() -> Result<()> {
                     port,
                     console_port,
                     bind_port,
+                    repeat,
+                    keep_logs,
                 };
                 run_suites(&suites, &opts).await
             }

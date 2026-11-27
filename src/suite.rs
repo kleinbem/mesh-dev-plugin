@@ -49,6 +49,27 @@ pub struct MeshSuiteConfig {
     /// Skip waiting for `dev/echo` on `/v1/models` before step 1 (e.g. for `--startup-delay-secs` tests).
     #[serde(default)]
     pub skip_initial_model_wait: bool,
+    /// Set `exclusive_gpu = true` on the `mesh-dev` plugin entry.
+    #[serde(default)]
+    pub exclusive_gpu: bool,
+    /// Start a serving node instead of `--client`, so `[[models]]` load on this host.
+    #[serde(default)]
+    pub serve: bool,
+    /// Raw `[[models]]` entries; `${VAR}` in strings expands from the runner's environment.
+    #[serde(default)]
+    pub models: Vec<toml::Table>,
+    /// Extra top-level tables merged into the generated `config.toml`.
+    #[serde(default)]
+    pub config: Option<toml::Table>,
+    /// Extra environment for the `mesh-llm` process (for example `RUST_LOG`).
+    #[serde(default)]
+    pub node_env: BTreeMap<String, String>,
+    /// Skip the suite instead of failing it when one of these runner variables is unset.
+    #[serde(default)]
+    pub requires_env: Vec<String>,
+    /// How long to wait for the console to come up (native runtimes start slower).
+    #[serde(default)]
+    pub ready_timeout_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -108,6 +129,46 @@ pub struct StepSpec {
     /// Record failures as non-fatal XFAIL/finding notes instead of aborting (for documenting known upstream bugs).
     #[serde(default)]
     pub expect_failure_note: Option<String>,
+    /// Read a file (`${NODE_HOME}` is the node's temporary HOME) into a variable.
+    #[serde(default)]
+    pub read_file: Option<ReadFileSpec>,
+    /// Fail unless the named background request is still waiting for its response.
+    #[serde(default)]
+    pub expect_pending: Option<String>,
+    /// Print the response status and body (for writing suites).
+    #[serde(default)]
+    pub dump: bool,
+    /// Join the named background request (`openai.background`) and check its response.
+    #[serde(default)]
+    pub await_background: Option<String>,
+    /// Abort the named background request, closing its socket: a client disconnect.
+    #[serde(default)]
+    pub drop_background: Option<String>,
+    /// Retry the step until its assertions pass or `timeout_ms` runs out.
+    #[serde(default)]
+    pub poll: bool,
+    /// Remember the current end of the mesh-llm log under this name.
+    #[serde(default)]
+    pub log_mark: Option<String>,
+    /// Limit this step's log assertions to lines written after the named mark.
+    #[serde(default)]
+    pub log_since: Option<String>,
+    /// Substrings the mesh-llm log must contain.
+    #[serde(default)]
+    pub expect_log_contains: Vec<String>,
+    /// Substrings the mesh-llm log must not contain.
+    #[serde(default)]
+    pub expect_log_not_contains: Vec<String>,
+    /// Exact number of log lines containing each substring.
+    #[serde(default)]
+    pub expect_log_count: BTreeMap<String, usize>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ReadFileSpec {
+    pub path: String,
+    /// Variable that receives the trimmed file content.
+    pub var: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -122,6 +183,12 @@ pub struct HttpCallSpec {
     /// Open a concurrent background holder request against this same spec (for backpressure tests)?
     #[serde(default)]
     pub concurrent_background: bool,
+    /// Start the request in the background under this name; `await_background` checks it later.
+    #[serde(default)]
+    pub background: Option<String>,
+    /// Close with a reset (SO_LINGER 0) when dropped instead of an orderly FIN.
+    #[serde(default)]
+    pub reset_on_drop: bool,
 }
 
 fn default_post() -> String {
@@ -142,6 +209,10 @@ pub struct SuiteRunOptions {
     pub port: u16,
     pub console_port: u16,
     pub bind_port: u16,
+    /// Run each suite this many times (races only show up under repetition).
+    pub repeat: u32,
+    /// Copy the mesh-llm log of a failed run into this directory.
+    pub keep_logs: Option<PathBuf>,
 }
 
 struct HttpResponse {
@@ -154,6 +225,7 @@ pub async fn run_suites(paths: &[PathBuf], opts: &SuiteRunOptions) -> Result<()>
     let mut total_suites = 0usize;
     let mut total_steps = 0usize;
     let mut failures = Vec::new();
+    let mut skipped = 0usize;
 
     for path in paths {
         total_suites += 1;
@@ -165,14 +237,26 @@ pub async fn run_suites(paths: &[PathBuf], opts: &SuiteRunOptions) -> Result<()>
         if !spec.description.is_empty() {
             println!("    {}", spec.description);
         }
-        match run_single_suite(&spec, opts).await {
-            Ok(steps_ran) => {
-                total_steps += steps_ran;
-                println!("PASS suite '{}' ({steps_ran} steps)\n", spec.name);
-            }
-            Err(err) => {
-                eprintln!("FAIL suite '{}': {err:#}\n", spec.name);
-                failures.push(format!("{}: {err:#}", spec.name));
+        for run in 1..=opts.repeat.max(1) {
+            let label = if opts.repeat > 1 {
+                format!("{} [run {run}/{}]", spec.name, opts.repeat)
+            } else {
+                spec.name.clone()
+            };
+            match run_single_suite(&spec, opts).await {
+                Ok(SuiteOutcome::Passed(steps_ran)) => {
+                    total_steps += steps_ran;
+                    println!("PASS suite '{label}' ({steps_ran} steps)\n");
+                }
+                Ok(SuiteOutcome::Skipped(reason)) => {
+                    println!("SKIP suite '{label}' ({reason})\n");
+                    skipped += 1;
+                    break;
+                }
+                Err(err) => {
+                    eprintln!("FAIL suite '{label}': {err:#}\n");
+                    failures.push(format!("{label}: {err:#}"));
+                }
             }
         }
     }
@@ -185,11 +269,28 @@ pub async fn run_suites(paths: &[PathBuf], opts: &SuiteRunOptions) -> Result<()>
             failures.join("\n  - ")
         );
     }
-    println!("ALL {total_suites} DECLARATIVE SUITES PASSED ({total_steps} total steps)");
+    println!(
+        "ALL {} DECLARATIVE SUITES PASSED ({total_steps} total steps, {skipped} skipped)",
+        total_suites - skipped
+    );
     Ok(())
 }
 
-async fn run_single_suite(spec: &SuiteSpec, opts: &SuiteRunOptions) -> Result<usize> {
+async fn run_single_suite(spec: &SuiteSpec, opts: &SuiteRunOptions) -> Result<SuiteOutcome> {
+    let missing: Vec<&str> = spec
+        .mesh
+        .requires_env
+        .iter()
+        .filter(|var| std::env::var_os(var).is_none_or(|v| v.is_empty()))
+        .map(String::as_str)
+        .collect();
+    if !missing.is_empty() {
+        return Ok(SuiteOutcome::Skipped(format!(
+            "unset: {}",
+            missing.join(", ")
+        )));
+    }
+
     let tmp_home = create_temp_home(&spec.name)?;
     let _cleanup = TempDirGuard(tmp_home.clone());
     let mesh_dir = tmp_home.join(".mesh-llm");
@@ -251,19 +352,23 @@ async fn run_single_suite(spec: &SuiteSpec, opts: &SuiteRunOptions) -> Result<us
 
     let stderr_log = tmp_home.join("mesh-llm.err");
     let stderr_file = std::fs::File::create(&stderr_log)?;
+    let mut node_args = vec![
+        "--config".to_string(),
+        config_path.display().to_string(),
+        "--port".to_string(),
+        opts.port.to_string(),
+        "--console".to_string(),
+        opts.console_port.to_string(),
+        "--bind-port".to_string(),
+        opts.bind_port.to_string(),
+    ];
+    if !spec.mesh.serve {
+        node_args.push("--client".to_string());
+    }
     let mut child = Command::new(&opts.mesh_llm_bin)
-        .args([
-            "--config",
-            &config_path.display().to_string(),
-            "--port",
-            &opts.port.to_string(),
-            "--console",
-            &opts.console_port.to_string(),
-            "--bind-port",
-            &opts.bind_port.to_string(),
-            "--client",
-        ])
+        .args(&node_args)
         .envs(&spec.mesh.plugin_env)
+        .envs(&spec.mesh.node_env)
         .env("HOME", &tmp_home)
         .env("XDG_CONFIG_HOME", tmp_home.join(".config"))
         .env("XDG_DATA_HOME", tmp_home.join(".local/share"))
@@ -275,29 +380,26 @@ async fn run_single_suite(spec: &SuiteSpec, opts: &SuiteRunOptions) -> Result<us
         .spawn()
         .with_context(|| format!("spawn {}", opts.mesh_llm_bin))?;
 
+    let ready_limit = Duration::from_millis(spec.mesh.ready_timeout_ms.unwrap_or(30_000));
     let result = async {
-        wait_console_ready(opts.console_port, Duration::from_secs(30)).await?;
+        wait_console_ready(opts.console_port, ready_limit).await?;
         if !spec.mesh.skip_initial_model_wait {
-            wait_for_model(opts.port, "dev/echo", Duration::from_secs(30)).await?;
+            wait_for_model(opts.port, "dev/echo", ready_limit).await?;
         }
 
-        let mut vars: BTreeMap<String, String> = BTreeMap::new();
-        let mut mcp_session_id: Option<String> = None;
-        let mut mcp_req_id: u64 = 1;
-        let mut background_handles: Vec<tokio::task::JoinHandle<()>> = Vec::new();
-
+        let mut ctx = RunCtx::new(stderr_log.clone());
+        ctx.vars
+            .insert("NODE_HOME".into(), tmp_home.display().to_string());
+        // Required runner variables are also usable as `${VAR}` in steps.
+        for var in &spec.mesh.requires_env {
+            if let Ok(value) = std::env::var(var) {
+                ctx.vars.insert(var.clone(), value);
+            }
+        }
         for (idx, step) in spec.steps.iter().enumerate() {
             let step_num = idx + 1;
             let t0 = Instant::now();
-            let step_res = execute_step(
-                step,
-                opts,
-                &mut vars,
-                &mut mcp_session_id,
-                &mut mcp_req_id,
-                &mut background_handles,
-            )
-            .await;
+            let step_res = execute_step_polled(step, opts, &mut ctx).await;
 
             match (step_res, &step.expect_failure_note) {
                 (Ok(()), None) => {
@@ -325,9 +427,7 @@ async fn run_single_suite(spec: &SuiteSpec, opts: &SuiteRunOptions) -> Result<us
                     );
                 }
                 (Err(err), None) => {
-                    for h in background_handles {
-                        h.abort();
-                    }
+                    ctx.abort_all();
                     let tail = tail_file(&stderr_log, 40);
                     return Err(err.context(format!(
                         "step {step_num} '{}' failed\n--- mesh-llm stderr tail ---\n{tail}",
@@ -337,26 +437,140 @@ async fn run_single_suite(spec: &SuiteSpec, opts: &SuiteRunOptions) -> Result<us
             }
         }
 
-        for h in background_handles {
-            h.abort();
-        }
+        ctx.abort_all();
         Ok(spec.steps.len())
     }
     .await;
 
     let _ = child.kill().await;
     let _ = timeout(Duration::from_secs(3), child.wait()).await;
-    result
+    if let (Err(_), Some(dir)) = (&result, &opts.keep_logs) {
+        keep_log(dir, &spec.name, &stderr_log);
+    }
+    result.map(SuiteOutcome::Passed)
 }
 
-async fn execute_step(
+enum SuiteOutcome {
+    Passed(usize),
+    Skipped(String),
+}
+
+type BackgroundRequest = tokio::task::JoinHandle<Result<HttpResponse>>;
+
+/// Per-run state shared by the steps of one suite.
+struct RunCtx {
+    vars: BTreeMap<String, String>,
+    mcp_session_id: Option<String>,
+    mcp_req_id: u64,
+    background_handles: Vec<tokio::task::JoinHandle<()>>,
+    named_background: BTreeMap<String, BackgroundRequest>,
+    log_path: PathBuf,
+    log_marks: BTreeMap<String, usize>,
+}
+
+impl RunCtx {
+    fn new(log_path: PathBuf) -> Self {
+        Self {
+            vars: BTreeMap::new(),
+            mcp_session_id: None,
+            mcp_req_id: 1,
+            background_handles: Vec::new(),
+            named_background: BTreeMap::new(),
+            log_path,
+            log_marks: BTreeMap::new(),
+        }
+    }
+
+    fn abort_all(&mut self) {
+        for h in self.background_handles.drain(..) {
+            h.abort();
+        }
+        for (_, h) in std::mem::take(&mut self.named_background) {
+            h.abort();
+        }
+    }
+}
+
+async fn execute_step_polled(
     step: &StepSpec,
     opts: &SuiteRunOptions,
-    vars: &mut BTreeMap<String, String>,
-    mcp_session_id: &mut Option<String>,
-    mcp_req_id: &mut u64,
-    background_handles: &mut Vec<tokio::task::JoinHandle<()>>,
+    ctx: &mut RunCtx,
 ) -> Result<()> {
+    if !step.poll {
+        return execute_step(step, opts, ctx).await;
+    }
+    let deadline = Instant::now() + Duration::from_millis(step.timeout_ms.unwrap_or(20_000));
+    loop {
+        match execute_step(step, opts, ctx).await {
+            Ok(()) => return Ok(()),
+            Err(err) if Instant::now() >= deadline => {
+                return Err(err.context("condition not reached before timeout_ms"));
+            }
+            Err(_) => sleep(Duration::from_millis(200)).await,
+        }
+    }
+}
+
+async fn execute_step(step: &StepSpec, opts: &SuiteRunOptions, ctx: &mut RunCtx) -> Result<()> {
+    execute_action(step, opts, ctx).await?;
+    check_log(step, ctx)?;
+    if let Some(mark) = &step.log_mark {
+        let len = std::fs::read_to_string(&ctx.log_path)
+            .map(|s| s.len())
+            .unwrap_or(0);
+        ctx.log_marks.insert(mark.clone(), len);
+    }
+    Ok(())
+}
+
+fn check_log(step: &StepSpec, ctx: &RunCtx) -> Result<()> {
+    if step.expect_log_contains.is_empty()
+        && step.expect_log_not_contains.is_empty()
+        && step.expect_log_count.is_empty()
+    {
+        return Ok(());
+    }
+    let full = std::fs::read_to_string(&ctx.log_path).unwrap_or_default();
+    let start = match &step.log_since {
+        Some(mark) => *ctx
+            .log_marks
+            .get(mark)
+            .ok_or_else(|| anyhow!("log mark '{mark}' not set"))?,
+        None => 0,
+    };
+    let log = full.get(start.min(full.len())..).unwrap_or_default();
+    for needle in &step.expect_log_contains {
+        anyhow::ensure!(
+            log.contains(needle.as_str()),
+            "mesh-llm log missing {needle:?}"
+        );
+    }
+    for needle in &step.expect_log_not_contains {
+        let hit = log.lines().find(|l| l.contains(needle.as_str()));
+        anyhow::ensure!(
+            hit.is_none(),
+            "mesh-llm log unexpectedly contained {needle:?}: {}",
+            hit.unwrap_or_default()
+        );
+    }
+    for (needle, expected) in &step.expect_log_count {
+        let got = log.lines().filter(|l| l.contains(needle.as_str())).count();
+        anyhow::ensure!(
+            got == *expected,
+            "mesh-llm log has {got} lines containing {needle:?}, expected {expected}"
+        );
+    }
+    Ok(())
+}
+
+fn step_has_log_checks(step: &StepSpec) -> bool {
+    !step.expect_log_contains.is_empty()
+        || !step.expect_log_not_contains.is_empty()
+        || !step.expect_log_count.is_empty()
+        || step.log_mark.is_some()
+}
+
+async fn execute_action(step: &StepSpec, opts: &SuiteRunOptions, ctx: &mut RunCtx) -> Result<()> {
     let step_timeout = Duration::from_millis(step.timeout_ms.unwrap_or(20_000));
 
     if let Some(ms) = step.sleep_ms {
@@ -364,14 +578,61 @@ async fn execute_step(
         return Ok(());
     }
 
+    if let Some(name) = &step.await_background {
+        let handle = ctx
+            .named_background
+            .remove(name)
+            .ok_or_else(|| anyhow!("no background request named '{name}'"))?;
+        let resp = match timeout(step_timeout, handle).await {
+            Ok(joined) => joined.context("background request task panicked")??,
+            Err(_) => bail!("background request '{name}' did not finish within {step_timeout:?}"),
+        };
+        return check_response(step, &resp, &mut ctx.vars);
+    }
+
+    if let Some(spec) = &step.read_file {
+        let path = substitute_str(&spec.path, &ctx.vars);
+        let content = std::fs::read_to_string(&path).with_context(|| format!("read {path}"))?;
+        ctx.vars
+            .insert(spec.var.clone(), content.trim().to_string());
+        return Ok(());
+    }
+
+    if let Some(name) = &step.expect_pending {
+        let handle = ctx
+            .named_background
+            .get(name)
+            .ok_or_else(|| anyhow!("no background request named '{name}'"))?;
+        anyhow::ensure!(
+            !handle.is_finished(),
+            "background request '{name}' already finished; expected it to be waiting"
+        );
+        return Ok(());
+    }
+
+    if let Some(name) = &step.drop_background {
+        let handle = ctx
+            .named_background
+            .remove(name)
+            .ok_or_else(|| anyhow!("no background request named '{name}'"))?;
+        anyhow::ensure!(
+            !handle.is_finished(),
+            "background request '{name}' already finished before the disconnect"
+        );
+        handle.abort();
+        let _ = handle.await;
+        return Ok(());
+    }
+
     if let Some(model) = &step.wait_model {
-        let model = substitute_str(model, vars);
+        let model = substitute_str(model, &ctx.vars);
         wait_for_model(opts.port, &model, step_timeout).await?;
         return Ok(());
     }
 
     if let Some(var_name) = &step.wait_restart_from {
-        let old_instance = vars
+        let old_instance = ctx
+            .vars
             .get(var_name)
             .cloned()
             .ok_or_else(|| anyhow!("wait_restart_from variable '{var_name}' not saved"))?;
@@ -399,7 +660,8 @@ async fn execute_step(
                 && let Some(new_id) = inner["plugin_instance_id"].as_str()
                 && new_id != old_instance
             {
-                vars.insert("restarted_instance_id".into(), new_id.to_string());
+                ctx.vars
+                    .insert("restarted_instance_id".into(), new_id.to_string());
                 return Ok(());
             }
             if Instant::now() >= deadline {
@@ -413,7 +675,7 @@ async fn execute_step(
 
     if let Some(op) = &step.op {
         let input_json = match &step.input {
-            Some(v) => substitute_json(toml_to_json(v)?, vars).to_string(),
+            Some(v) => substitute_json(toml_to_json(v)?, &ctx.vars).to_string(),
             None => "{}".to_string(),
         };
         let path = format!("/api/plugins/mesh-dev/tools/{op}");
@@ -426,41 +688,30 @@ async fn execute_step(
             step_timeout,
         )
         .await?;
-        return check_response(step, &resp, vars);
+        return check_response(step, &resp, &mut ctx.vars);
     }
 
     if let Some(call) = &step.openai {
-        return run_http_call(
-            step,
-            call,
-            opts.port,
-            step_timeout,
-            vars,
-            background_handles,
-        )
-        .await;
+        return run_http_call(step, call, opts.port, step_timeout, ctx).await;
     }
 
     if let Some(call) = &step.console_http {
-        return run_http_call(
-            step,
-            call,
-            opts.console_port,
-            step_timeout,
-            vars,
-            background_handles,
-        )
-        .await;
+        return run_http_call(step, call, opts.console_port, step_timeout, ctx).await;
     }
 
     if let Some(mcp) = &step.mcp {
-        ensure_mcp_session(opts.console_port, mcp_session_id, mcp_req_id).await?;
+        ensure_mcp_session(
+            opts.console_port,
+            &mut ctx.mcp_session_id,
+            &mut ctx.mcp_req_id,
+        )
+        .await?;
         let params = match &mcp.params {
-            Some(p) => substitute_json(toml_to_json(p)?, vars),
+            Some(p) => substitute_json(toml_to_json(p)?, &ctx.vars),
             None => json!({}),
         };
-        let id = *mcp_req_id;
-        *mcp_req_id += 1;
+        let id = ctx.mcp_req_id;
+        ctx.mcp_req_id += 1;
         let rpc = json!({
             "jsonrpc": "2.0",
             "id": id,
@@ -473,7 +724,7 @@ async fn execute_step(
             "Accept".into(),
             "application/json, text/event-stream".into(),
         );
-        if let Some(sid) = mcp_session_id.as_ref() {
+        if let Some(sid) = ctx.mcp_session_id.as_ref() {
             headers.insert("Mcp-Session-Id".into(), sid.clone());
         }
         let resp = http_request(
@@ -491,11 +742,14 @@ async fn execute_step(
             headers: resp.headers,
             body: unwrapped,
         };
-        return check_response(step, &normalized, vars);
+        return check_response(step, &normalized, &mut ctx.vars);
     }
 
+    if step_has_log_checks(step) {
+        return Ok(());
+    }
     bail!(
-        "step '{}' has no action (op, openai, console_http, mcp, sleep_ms, wait_model, or wait_restart_from)",
+        "step '{}' has no action (op, openai, console_http, mcp, sleep_ms, wait_model, wait_restart_from, await_background, drop_background, expect_pending, read_file, or log checks)",
         step.name
     );
 }
@@ -505,9 +759,9 @@ async fn run_http_call(
     call: &HttpCallSpec,
     port: u16,
     step_timeout: Duration,
-    vars: &mut BTreeMap<String, String>,
-    background_handles: &mut Vec<tokio::task::JoinHandle<()>>,
+    ctx: &mut RunCtx,
 ) -> Result<()> {
+    let vars = &ctx.vars;
     let path = substitute_str(&call.path, vars);
     let mut headers = BTreeMap::new();
     for (k, v) in &call.headers {
@@ -517,6 +771,31 @@ async fn run_http_call(
         Some(v) => Some(substitute_json(toml_to_json(v)?, vars).to_string()),
         None => None,
     };
+
+    if let Some(name) = &call.background {
+        anyhow::ensure!(
+            !ctx.named_background.contains_key(name),
+            "background request '{name}' is already running"
+        );
+        let method = call.method.clone();
+        let reset = call.reset_on_drop;
+        let handle = tokio::spawn(async move {
+            http_request_with(
+                port,
+                &method,
+                &path,
+                &headers,
+                body.as_deref(),
+                step_timeout,
+                reset,
+            )
+            .await
+        });
+        ctx.named_background.insert(name.clone(), handle);
+        // Give the request time to reach the proxy before the next step runs.
+        sleep(Duration::from_millis(150)).await;
+        return Ok(());
+    }
 
     if call.concurrent_background {
         let method = call.method.clone();
@@ -531,7 +810,7 @@ async fn run_http_call(
             )
             .await;
         });
-        background_handles.push(handle);
+        ctx.background_handles.push(handle);
         sleep(Duration::from_millis(150)).await;
         return Ok(());
     }
@@ -545,7 +824,7 @@ async fn run_http_call(
         step_timeout,
     )
     .await?;
-    check_response(step, &resp, vars)
+    check_response(step, &resp, &mut ctx.vars)
 }
 
 async fn ensure_mcp_session(
@@ -640,6 +919,13 @@ fn check_response(
     resp: &HttpResponse,
     vars: &mut BTreeMap<String, String>,
 ) -> Result<()> {
+    if step.dump {
+        println!(
+            "    [dump] HTTP {}: {}",
+            resp.status,
+            truncate(&resp.body, 20_000)
+        );
+    }
     if let Some(expected) = step.expect_status {
         anyhow::ensure!(
             resp.status == expected,
@@ -895,11 +1181,88 @@ fn render_mesh_config(cfg: &MeshSuiteConfig, command: Option<&str>) -> Result<St
         );
     }
 
+    if cfg.exclusive_gpu {
+        plugin.insert("exclusive_gpu".into(), toml::Value::Boolean(true));
+    }
+
     root.insert(
         "plugin".into(),
         toml::Value::Array(vec![toml::Value::Table(plugin)]),
     );
+    if !cfg.models.is_empty() {
+        let models = cfg
+            .models
+            .iter()
+            .map(|m| expand_env_toml(toml::Value::Table(m.clone())))
+            .collect::<Result<Vec<_>>>()?;
+        root.insert("models".into(), toml::Value::Array(models));
+    }
+    if let Some(extra) = &cfg.config {
+        for (key, value) in extra {
+            anyhow::ensure!(
+                !root.contains_key(key),
+                "suite config table '{key}' collides with a generated key"
+            );
+            root.insert(key.clone(), expand_env_toml(value.clone())?);
+        }
+    }
     toml::to_string_pretty(&root).context("serialize generated mesh-llm config.toml")
+}
+
+/// Expand `${VAR}` in TOML strings from the runner's environment.
+fn expand_env_toml(value: toml::Value) -> Result<toml::Value> {
+    Ok(match value {
+        toml::Value::String(s) => toml::Value::String(expand_env_str(&s)?),
+        toml::Value::Array(items) => toml::Value::Array(
+            items
+                .into_iter()
+                .map(expand_env_toml)
+                .collect::<Result<Vec<_>>>()?,
+        ),
+        toml::Value::Table(table) => toml::Value::Table(
+            table
+                .into_iter()
+                .map(|(k, v)| Ok((k, expand_env_toml(v)?)))
+                .collect::<Result<toml::Table>>()?,
+        ),
+        other => other,
+    })
+}
+
+fn expand_env_str(input: &str) -> Result<String> {
+    let mut out = String::with_capacity(input.len());
+    let mut rest = input;
+    while let Some(start) = rest.find("${") {
+        out.push_str(&rest[..start]);
+        let after = &rest[start + 2..];
+        let end = after
+            .find('}')
+            .ok_or_else(|| anyhow!("unterminated ${{ in {input:?}"))?;
+        let name = &after[..end];
+        let value = std::env::var(name).with_context(|| {
+            format!("environment variable {name} (used in suite config) is unset")
+        })?;
+        out.push_str(&value);
+        rest = &after[end + 1..];
+    }
+    out.push_str(rest);
+    Ok(out)
+}
+
+fn keep_log(dir: &Path, suite_name: &str, log: &Path) {
+    let safe: String = suite_name
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect();
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let _ = std::fs::create_dir_all(dir);
+    let dest = dir.join(format!("{safe}-{nanos}.log"));
+    if std::fs::copy(log, &dest).is_ok() {
+        eprintln!("    mesh-llm log kept at {}", dest.display());
+    }
 }
 
 async fn wait_console_ready(console_port: u16, limit: Duration) -> Result<()> {
@@ -958,9 +1321,24 @@ async fn http_request(
     body: Option<&str>,
     limit: Duration,
 ) -> Result<HttpResponse> {
+    http_request_with(port, method, path, extra_headers, body, limit, false).await
+}
+
+async fn http_request_with(
+    port: u16,
+    method: &str,
+    path: &str,
+    extra_headers: &BTreeMap<String, String>,
+    body: Option<&str>,
+    limit: Duration,
+    reset_on_drop: bool,
+) -> Result<HttpResponse> {
     let mut stream = timeout(limit, TcpStream::connect(("127.0.0.1", port)))
         .await
         .context("HTTP connect timeout")??;
+    if reset_on_drop {
+        stream.set_zero_linger()?;
+    }
     let mut req =
         format!("{method} {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n");
     for (k, v) in extra_headers {
