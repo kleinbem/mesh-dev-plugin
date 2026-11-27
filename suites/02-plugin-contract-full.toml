@@ -1,0 +1,281 @@
+name = "02-plugin-contract-full"
+description = "Exercises every mesh-llm 0.80.0 plugin capability: config_schema settings, stapled buffered & streamed HTTP, full Streamable HTTP MCP (tools, resources, templates, prompts, completions, SEP-2663 tasks), virtual model nested infer, plugin_status, plugin_keys, peer_blocks, local_channel, openai_exchange admission + response_headers + sha256-v1 side streams, and crash-restart supervision."
+
+[mesh]
+plugin_args = ["--max-concurrency", "4"]
+allow_inference_observation = true
+allow_peer_blocks = true
+
+[mesh.settings]
+greeting = "from-suite-02"
+default_delay_ms = 25
+strict_mode = true
+profile = "default"
+
+[mesh.openai_exchange_grant]
+endpoints = ["chat_completions", "completions", "responses"]
+phases = ["request_received", "backend_selected", "exchange_finished"]
+metadata = true
+admission = true
+headers = ["x-mesh-target", "x-mesh-exclude", "x-request-id", "x-mesh-nonce", "x-mesh-dev-nonce", "x-plugin-6d6573682d646576-hook"]
+request_body = true
+effective_request_body = true
+response_body = true
+deadline_ms = 500
+max_body_bytes = 1048576
+max_queue_bytes = 4194304
+max_in_flight = 32
+
+[[step]]
+name = "status op confirms typed [plugin.settings] propagation and negotiated capabilities"
+op = "status"
+expect_status = 200
+expect_json = { "received_settings.greeting" = "from-suite-02", "received_settings.default_delay_ms" = 25, "received_settings.strict_mode" = true, "received_settings.profile" = "default", "negotiated_capabilities.openai_exchange" = true, "negotiated_capabilities.plugin_status" = true, "negotiated_capabilities.local_channels" = true }
+
+[[step]]
+name = "GET /api/plugins/mesh-dev/manifest exposes full v3 plugin contract"
+console_http = { method = "GET", path = "/api/plugins/mesh-dev/manifest" }
+expect_status = 200
+expect_contains = [
+  "openai_compatible",
+  "mesh-dev://status",
+  "mesh-dev://inspect/{source}",
+  "diagnose_model",
+  "dev/virtual-echo",
+  "mesh-dev/bus",
+]
+
+[[step]]
+name = "stapled buffered GET /api/plugins/mesh-dev/http/ping echoes [plugin.settings]"
+console_http = { method = "GET", path = "/api/plugins/mesh-dev/http/ping" }
+expect_status = 200
+expect_json = { "ok" = true, "greeting" = "from-suite-02", "route" = "GET /ping" }
+
+[[step]]
+name = "stapled buffered POST /api/plugins/mesh-dev/http/echo forwards JSON body"
+console_http = { method = "POST", path = "/api/plugins/mesh-dev/http/echo", body = { message = "stapled-echo-02" } }
+expect_status = 200
+expect_json = { "echo.message" = "stapled-echo-02", "route" = "POST /echo" }
+
+[[step]]
+name = "stapled streamed GET /api/plugins/mesh-dev/http/stream streams over StreamMode::Http1 side stream"
+console_http = { method = "GET", path = "/api/plugins/mesh-dev/http/stream" }
+expect_status = 200
+expect_contains = ["stapled_stream", "\"chunk\":1", "\"chunk\":2", "[DONE]"]
+
+[[step]]
+name = "MCP tools/list exposes mesh-dev operations"
+mcp = { method = "tools/list" }
+expect_status = 200
+expect_contains = ["status", "inspect_recent", "env_probe", "create_task"]
+
+[[step]]
+name = "MCP tools/call invokes mesh-dev status tool"
+mcp = { method = "tools/call", params = { name = "mesh-dev.status", arguments = {} } }
+expect_status = 200
+expect_contains = ["from-suite-02"]
+
+[[step]]
+name = "MCP resources/list exposes exact resources"
+mcp = { method = "resources/list" }
+expect_status = 200
+expect_contains = ["mesh-dev://status", "mesh-dev://models"]
+
+[[step]]
+name = "MCP resources/read reads mesh-dev://status"
+mcp = { method = "resources/read", params = { uri = "mesh-dev://status" } }
+expect_status = 200
+expect_contains = ["from-suite-02", "dev/echo"]
+
+[[step]]
+name = "MCP resources/templates/list exposes mesh-dev://inspect/{source}"
+mcp = { method = "resources/templates/list" }
+expect_status = 200
+expect_contains = ["mesh-dev://inspect/{source}"]
+
+[[step]]
+name = "MCP resources/read expands prefix template mesh-dev://inspect/http"
+mcp = { method = "resources/read", params = { uri = "mesh-dev://inspect/http" } }
+expect_status = 200
+expect_json = { "result.contents.0.uri" = "mesh-dev://inspect/http", "result.contents.0.text|json.source" = "http" }
+
+[[step]]
+name = "MCP prompts/list exposes diagnose_model"
+mcp = { method = "prompts/list" }
+expect_status = 200
+expect_contains = ["diagnose_model"]
+
+[[step]]
+name = "MCP prompts/get renders diagnose_model prompt"
+mcp = { method = "prompts/get", params = { name = "mesh-dev.diagnose_model", arguments = { model = "dev/mem-probe" } } }
+expect_status = 200
+expect_contains = ["dev/mem-probe"]
+
+[[step]]
+name = "MCP completion/complete suggests matching dev/* models"
+mcp = { method = "completion/complete", params = { ref = { type = "ref/prompt", name = "mesh-dev.diagnose_model" }, argument = { name = "model", value = "dev/mem" } } }
+expect_status = 200
+expect_contains = ["dev/mem-probe"]
+
+[[step]]
+name = "SEP-2663 task lifecycle: create_task via plugin op"
+op = "create_task"
+input = { label = "suite-02-task" }
+expect_status = 200
+expect_json = { "status" = "working", "label" = "suite-02-task" }
+save_json = { task_id = "task_id" }
+
+[[step]]
+name = "SEP-2663 MCP tasks/get returns working task"
+mcp = { method = "tasks/get", params = { taskId = "${task_id}" } }
+expect_status = 200
+expect_contains = ["${task_id}", "working"]
+
+[[step]]
+name = "SEP-2663 MCP tasks/update transitions task to completed"
+mcp = { method = "tasks/update", params = { taskId = "${task_id}", inputResponses = {} } }
+expect_status = 200
+
+[[step]]
+name = "SEP-2663 MCP tasks/get confirms completed state"
+mcp = { method = "tasks/get", params = { taskId = "${task_id}" } }
+expect_status = 200
+expect_contains = ["${task_id}", "completed"]
+
+[[step]]
+name = "SEP-2663 create second task for cancel test"
+op = "create_task"
+input = { label = "suite-02-cancel" }
+expect_status = 200
+save_json = { cancel_task_id = "task_id" }
+
+[[step]]
+name = "SEP-2663 MCP tasks/cancel cancels task"
+mcp = { method = "tasks/cancel", params = { taskId = "${cancel_task_id}" } }
+expect_status = 200
+
+[[step]]
+name = "SEP-2663 MCP tasks/get confirms cancelled state"
+mcp = { method = "tasks/get", params = { taskId = "${cancel_task_id}" } }
+expect_status = 200
+expect_contains = ["${cancel_task_id}", "cancelled"]
+
+[[step]]
+name = "virtual model dev/virtual-echo invokes nested PluginContext::infer(dev/echo) non-streaming"
+openai = { method = "POST", path = "/v1/chat/completions", body = { model = "dev/virtual-echo", messages = [{ role = "user", content = "nested virtual test" }] } }
+expect_status = 200
+expect_contains = ["dev/virtual-echo", "nested virtual test"]
+
+[[step]]
+name = "virtual model dev/virtual-echo streaming emits SSE and [DONE]"
+openai = { method = "POST", path = "/v1/chat/completions", body = { model = "dev/virtual-echo", stream = true, messages = [{ role = "user", content = "nested virtual stream" }] } }
+expect_status = 200
+expect_contains = ["data:", "[DONE]"]
+
+[[step]]
+name = "plugin_status.v1 publish_status appears under /api/status plugins.mesh-dev"
+op = "publish_status"
+input = { payload = { summary = "suite-02-healthy" }, fresh_for_ms = 60000 }
+expect_status = 200
+expect_json = { "published" = true }
+
+[[step]]
+name = "GET /api/status serves snapshot under plugins.mesh-dev"
+console_http = { method = "GET", path = "/api/status" }
+expect_status = 200
+expect_json = { "plugins.mesh-dev.state" = "ready", "plugins.mesh-dev.data.summary" = "suite-02-healthy" }
+
+[[step]]
+name = "plugin_status.v1 withdraw removes snapshot"
+op = "publish_status"
+input = { withdraw = true }
+expect_status = 200
+expect_json = { "withdrawn" = true }
+
+[[step]]
+name = "plugin_keys.v1 announce_key registers Ed25519 key"
+op = "announce_key"
+input = {}
+expect_status = 200
+expect_json = { "announced" = true }
+
+[[step]]
+name = "GET /api/plugin-keys lists announced mesh-dev key"
+console_http = { method = "GET", path = "/api/plugin-keys" }
+expect_status = 200
+expect_contains = ["mesh-dev"]
+
+[[step]]
+name = "plugin_keys.v1 withdraw key succeeds"
+op = "announce_key"
+input = { public_key_hex = "" }
+expect_status = 200
+expect_json = { "announced" = false, "withdrawn" = true }
+
+[[step]]
+name = "peer_blocks.v1 block peer succeeds when allow_peer_blocks = true"
+op = "peer_block"
+input = { action = "block", peer_id = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", length = "seven_days" }
+expect_status = 200
+expect_json = { "choice" = { exists = true } }
+
+[[step]]
+name = "peer_blocks.v1 unblock peer succeeds"
+op = "peer_block"
+input = { action = "unblock", peer_id = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" }
+expect_status = 200
+expect_json = { "choice" = { exists = true } }
+
+[[step]]
+name = "local_channel send_channel broadcasts on mesh-dev/bus"
+op = "send_channel"
+input = { channel = "mesh-dev/bus", payload = { ping = "suite-02" } }
+expect_status = 200
+expect_json = { "sent" = true, "channel" = "mesh-dev/bus" }
+
+[[step]]
+name = "openai_exchange.v1 set_exchange_policy injects custom response header"
+op = "set_exchange_policy"
+input = { decision = "allow", response_headers = [["x-plugin-6d6573682d646576-hook", "admitted-v1"]] }
+expect_status = 200
+
+[[step]]
+name = "dev/echo response includes hook-injected x-plugin-<hex>-hook header"
+openai = { method = "POST", path = "/v1/chat/completions", body = { model = "dev/echo", messages = [{ role = "user", content = "header hook test" }] } }
+expect_status = 200
+expect_headers = { "x-plugin-6d6573682d646576-hook" = "admitted-v1" }
+save_json = { before_crash = "choices.0.message.content|json.plugin_instance_id" }
+
+[[step]]
+name = "openai_exchange.v1 set_exchange_policy deny blocks inference admission"
+op = "set_exchange_policy"
+input = { decision = "deny", reason = "blocked by suite-02 admission hook" }
+expect_status = 200
+
+[[step]]
+name = "dev/echo is denied by openai_exchange.v1 admission hook"
+openai = { method = "POST", path = "/v1/chat/completions", body = { model = "dev/echo", messages = [{ role = "user", content = "should be denied" }] } }
+expect_status = 403
+expect_contains = ["permission_denied", "OpenAI plugin admission rejected the exchange"]
+
+[[step]]
+name = "reset_faults restores admission allow"
+op = "reset_faults"
+expect_status = 200
+
+[[step]]
+name = "stats verifies sha256-v1 wire-byte side-stream receipts were computed"
+op = "stats"
+expect_status = 200
+expect_json = { "inspector.exchange.distinct_exchanges" = { gte = 2 }, "inspector.exchange.side_streams_verified" = { gte = 1 } }
+
+[[step]]
+name = "inject_crash terminates mesh-dev to verify host supervision restart"
+op = "inject_crash"
+input = { exit_code = 1, delay_ms = 50 }
+expect_status = 200
+
+[[step]]
+name = "mesh-llm restarts mesh-dev with a new plugin_instance_id"
+wait_restart_from = "before_crash"
+timeout_ms = 25000

@@ -1,0 +1,55 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Verify Cargo.toml and plugin.toml versions match
+        run: |
+          cargo_ver=$(awk -F'"' '/^version =/{print $2; exit}' Cargo.toml)
+          plugin_ver=$(awk -F'"' '/^version =/{print $2; exit}' plugin.toml)
+          echo "Cargo.toml=${cargo_ver} plugin.toml=${plugin_ver}"
+          test "$cargo_ver" = "$plugin_ver"
+
+      - name: Format check
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --locked --all-targets -- -D warnings
+
+      - name: Unit, HTTP, protocol, and lifecycle tests
+        run: cargo test --locked -- --test-threads 1
+
+      - name: Build release archive and smoke-test binary
+        run: |
+          cargo build --locked --release --bin mesh-dev
+          stage="mesh-dev-x86_64-unknown-linux-gnu"
+          root="${stage}/mesh-dev"
+          mkdir -p "$root"
+          cp target/release/mesh-dev "$root/mesh-dev"
+          ./target/release/mesh-dev manifest > "$root/plugin-manifest.json"
+          cp plugin.toml README.md LICENSE "$root/"
+          tar czf "${stage}.tar.gz" -C "$stage" mesh-dev
+          mkdir -p smoke-extract
+          tar xzf "${stage}.tar.gz" -C smoke-extract
+          ./smoke-extract/mesh-dev/mesh-dev --help
+          grep -q '"config_schema"' smoke-extract/mesh-dev/plugin-manifest.json
+          grep -q '"openai_exchange_hook"' smoke-extract/mesh-dev/plugin-manifest.json
+          ./smoke-extract/mesh-dev/mesh-dev mem-probe --gpu-probe off | grep -q '"mem_available_kb"'

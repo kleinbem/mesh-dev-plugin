@@ -1,0 +1,43 @@
+[package]
+name = "mesh-dev"
+version = "0.2.0"
+edition = "2024"
+license = "Apache-2.0"
+description = "Zero-GPU developer and test plugin for Mesh-LLM: programmable fake OpenAI models, supervision fault injection, and live observation/exchange inspection."
+repository = "https://github.com/kleinbem/mesh-dev-plugin"
+
+[lib]
+name = "mesh_dev"
+path = "src/lib.rs"
+
+[[bin]]
+name = "mesh-dev"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+axum = "0.8"
+bytes = "1"
+clap = { version = "4", features = ["derive", "env"] }
+futures-util = "0.3"
+hex = "0.4"
+mesh-llm-plugin = { git = "https://github.com/Mesh-LLM/mesh-llm.git", rev = "ea3d3e5c68bd45f00dda05dd7f216a9070c2534d" }
+rmcp = { version = "3", features = ["server"] }
+schemars = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.11"
+tokio = { version = "1", features = ["full"] }
+tokio-stream = "0.1"
+toml = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "debuginfo"
