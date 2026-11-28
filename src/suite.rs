@@ -129,7 +129,8 @@ pub struct StepSpec {
     /// Record failures as non-fatal XFAIL/finding notes instead of aborting (for documenting known upstream bugs).
     #[serde(default)]
     pub expect_failure_note: Option<String>,
-    /// Read a file (`${NODE_HOME}` is the node's temporary HOME) into a variable.
+    /// Read a file into a variable (`${NODE_HOME}` is the node's temporary HOME,
+    /// `${OWNER_CONTROL_TOKEN}` the path of its owner-control token).
     #[serde(default)]
     pub read_file: Option<ReadFileSpec>,
     /// Fail unless the named background request is still waiting for its response.
@@ -390,6 +391,10 @@ async fn run_single_suite(spec: &SuiteSpec, opts: &SuiteRunOptions) -> Result<Su
         let mut ctx = RunCtx::new(stderr_log.clone());
         ctx.vars
             .insert("NODE_HOME".into(), tmp_home.display().to_string());
+        ctx.vars.insert(
+            "OWNER_CONTROL_TOKEN".into(),
+            owner_control_token_path(&tmp_home).display().to_string(),
+        );
         // Required runner variables are also usable as `${VAR}` in steps.
         for var in &spec.mesh.requires_env {
             if let Ok(value) = std::env::var(var) {
@@ -447,6 +452,19 @@ async fn run_single_suite(spec: &SuiteSpec, opts: &SuiteRunOptions) -> Result<Su
         keep_log(dir, &spec.name, &stderr_log);
     }
     result.map(SuiteOutcome::Passed)
+}
+
+/// Where the node writes its owner-control token. mesh-llm finds its home with
+/// `dirs::home_dir()`, which on Windows is the real user profile, not `HOME`.
+fn owner_control_token_path(node_home: &std::path::Path) -> std::path::PathBuf {
+    let home = if cfg!(windows) {
+        std::env::var_os("USERPROFILE")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| node_home.to_path_buf())
+    } else {
+        node_home.to_path_buf()
+    };
+    home.join(".mesh-llm").join("owner-control-token-v2")
 }
 
 /// Stop mesh-llm with SIGTERM so it shuts down cleanly (and an instrumented build

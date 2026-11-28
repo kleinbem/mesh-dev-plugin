@@ -289,7 +289,7 @@ expect_contains = ['"name":"native-qwen"']
 
 [[step]]
 name = "read the owner-control token"
-read_file = { path = "${NODE_HOME}/.mesh-llm/owner-control-token-v2", var = "owner_token" }
+read_file = { path = "${OWNER_CONTROL_TOKEN}", var = "owner_token" }
 
 [[step]]
 name = "owner unloads the native model"
