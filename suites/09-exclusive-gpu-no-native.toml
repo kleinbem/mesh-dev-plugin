@@ -1,0 +1,31 @@
+name = "09-exclusive-gpu-no-native"
+description = "exclusive_gpu on a serving node without on-demand native models (Mesh-LLM/mesh-llm#3195): there is nothing to hand off, so requests to the plugin don't wait for each other."
+
+[mesh]
+serve = true
+exclusive_gpu = true
+plugin_args = ["--max-concurrency", "8"]
+
+[mesh.node_env]
+MESH_LLM_NO_RUNTIME_DOWNLOAD = "1"
+
+[[step]]
+name = "first plugin request holds 5s"
+openai = { method = "POST", path = "/v1/chat/completions", body = { model = "dev/mem-probe-hold-5s", messages = [{ role = "user", content = "hold" }] }, background = "hold" }
+timeout_ms = 30000
+
+[[step]]
+name = "second plugin request answers while the first still holds"
+openai = { method = "POST", path = "/v1/chat/completions", body = { model = "dev/echo", messages = [{ role = "user", content = "not serialized" }] } }
+timeout_ms = 3000
+expect_status = 200
+
+[[step]]
+name = "the first request is still running"
+expect_pending = "hold"
+
+[[step]]
+name = "first request finishes"
+await_background = "hold"
+expect_status = 200
+expect_log_not_contains = ["exclusive_gpu handoff failed", "Unloaded local model"]

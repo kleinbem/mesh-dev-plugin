@@ -12,8 +12,11 @@ binary.
 # 1. In-process Rust unit, protocol, lifecycle, security, and declarative `plugin!` DSL tests (45 tests)
 nix develop --command cargo test --locked -- --test-threads 1
 
-# 2. All 5 declarative TOML E2E suites live against real `mesh-llm 0.80.0` (96 steps)
+# 2. The declarative TOML E2E suites live against a real `mesh-llm` (suites 01-05: 96 steps)
 nix develop --command just e2e-suites /path/to/mesh-llm
+
+# 3. exclusive_gpu suites 06-09: 06-08 need a small GGUF next to a native runtime and skip without it
+MESH_DEV_NATIVE_GGUF=$(realpath /path/to/Qwen3-0.6B-Q4_K_M.gguf) nix develop --command just e2e-suites /path/to/mesh-llm
 ```
 
 ---
@@ -136,6 +139,24 @@ nix develop --command just e2e-suites /path/to/mesh-llm
   `http://` probes also honor `HTTP_PROXY`/`ALL_PROXY` instead of talking to loopback directly.
 - **Upstream**: `upstream: Mesh-LLM/mesh-llm#3196`
 - **Reproducer**: Run `mesh-dev test-suite` against `mesh-llm` in a Nix sandbox without `pkgs.cacert` (or with empty `SSL_CERT_FILE`/`SSL_CERT_DIR` and closed `HTTP_PROXY`).
+
+---
+
+## Upstream Changes Under Test
+
+### `exclusive_gpu` handoff for on-demand native models
+
+- **Upstream**: `tracking: Mesh-LLM/mesh-llm#3174`, `upstream: Mesh-LLM/mesh-llm#3195`
+- **Suites**: `06-exclusive-gpu-handoff` (52 steps), `07-exclusive-gpu-opt-out` (3),
+  `08-exclusive-gpu-edges` (22), `09-exclusive-gpu-no-native` (4)
+- **Covers**: unload before the plugin runs, pinned models kept, native requests waiting and
+  reloading, plugin requests serializing behind the handoff (and not serializing without on-demand
+  models), streamed responses holding the GPU until they end, a dropped stream releasing it, client
+  resets while waiting, warm requests on a retired port, owner unloads racing the handoff,
+  selected-route denials, and a virtual model's nested call into the exclusive plugin.
+- **Known limit (XFAIL in suite 06)**: a client that closes normally (FIN) while waiting can't be
+  told apart from a write-half-closed client, which mesh-llm keeps serving, so that request still
+  unloads native models and reaches the plugin. Only resets and QUIC stops skip the handoff.
 
 ---
 
