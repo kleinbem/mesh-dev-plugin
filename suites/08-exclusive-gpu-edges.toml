@@ -1,0 +1,160 @@
+name = "08-exclusive-gpu-edges"
+description = "exclusive_gpu edge cases (Mesh-LLM/mesh-llm#3195): every on-demand native model is unloaded, streamed plugin responses hold the GPU until they end, a client dropping mid-stream releases it, and a virtual model's nested call into the exclusive plugin does not deadlock."
+
+# MESH_DEV_NATIVE_GGUF: a small GGUF (a regular file, not a symlink).
+[mesh]
+serve = true
+exclusive_gpu = true
+requires_env = ["MESH_DEV_NATIVE_GGUF"]
+ready_timeout_ms = 180000
+plugin_args = ["--max-concurrency", "8"]
+
+[mesh.node_env]
+MESH_LLM_NO_RUNTIME_DOWNLOAD = "1"
+RUST_LOG = "info"
+
+[[mesh.models]]
+model = "native-a"
+hardware = { model_path = "${MESH_DEV_NATIVE_GGUF}" }
+lifecycle = { load = "on_demand", idle_timeout_secs = 0 }
+
+[[mesh.models]]
+model = "native-b"
+hardware = { model_path = "${MESH_DEV_NATIVE_GGUF}" }
+lifecycle = { load = "on_demand", idle_timeout_secs = 0 }
+
+# --- Two on-demand native models ------------------------------------------------------
+
+[[step]]
+name = "native-a loads"
+openai = { method = "POST", path = "/v1/chat/completions", body = { model = "native-a", max_tokens = 4, messages = [{ role = "user", content = "a" }] } }
+timeout_ms = 180000
+expect_status = 200
+
+[[step]]
+name = "native-b loads"
+openai = { method = "POST", path = "/v1/chat/completions", body = { model = "native-b", max_tokens = 4, messages = [{ role = "user", content = "b" }] } }
+timeout_ms = 180000
+expect_status = 200
+
+[[step]]
+name = "both are resident"
+console_http = { method = "GET", path = "/api/runtime" }
+expect_contains = ['"name":"native-a"', '"name":"native-b"']
+log_mark = "two-models"
+
+[[step]]
+name = "one plugin request"
+openai = { method = "POST", path = "/v1/chat/completions", body = { model = "dev/echo", messages = [{ role = "user", content = "unload both" }] } }
+expect_status = 200
+
+[[step]]
+name = "both on-demand models were unloaded once each"
+console_http = { method = "GET", path = "/api/runtime" }
+expect_not_contains = ['"name":"native-a"', '"name":"native-b"']
+log_since = "two-models"
+expect_log_count = { "Unloaded local model 'native-a'" = 1, "Unloaded local model 'native-b'" = 1 }
+
+# --- Streamed plugin response holds the GPU until it ends -----------------------------
+
+[[step]]
+name = "native-a resident again"
+openai = { method = "POST", path = "/v1/chat/completions", body = { model = "native-a", max_tokens = 4, messages = [{ role = "user", content = "a" }] } }
+timeout_ms = 180000
+expect_status = 200
+
+[[step]]
+name = "plugin streams 8 tokens at 1 tok/s"
+openai = { method = "POST", path = "/v1/chat/completions", body = { model = "dev/slow-sse-1tps", stream = true, max_tokens = 8, messages = [{ role = "user", content = "stream" }] }, background = "stream" }
+timeout_ms = 60000
+
+[[step]]
+name = "native-a is unloaded while the stream runs"
+console_http = { method = "GET", path = "/api/runtime" }
+poll = true
+timeout_ms = 5000
+expect_not_contains = ['"name":"native-a"']
+
+[[step]]
+name = "native request during the stream"
+openai = { method = "POST", path = "/v1/chat/completions", body = { model = "native-a", max_tokens = 4, messages = [{ role = "user", content = "during stream" }] }, background = "native-during-stream" }
+timeout_ms = 240000
+
+[[step]]
+name = "stream still running after 3s"
+sleep_ms = 3000
+
+[[step]]
+name = "native request waits for the stream"
+expect_pending = "native-during-stream"
+
+[[step]]
+name = "stream completes"
+await_background = "stream"
+expect_status = 200
+expect_contains = ["[DONE]"]
+
+[[step]]
+name = "native request then reloads and answers"
+await_background = "native-during-stream"
+timeout_ms = 240000
+expect_status = 200
+expect_contains = ['"model":"native-a"']
+
+# --- Client drops a streamed plugin response mid-stream ------------------------------
+
+[[step]]
+name = "plugin streams 60 tokens at 1 tok/s"
+openai = { method = "POST", path = "/v1/chat/completions", body = { model = "dev/slow-sse-1tps", stream = true, max_tokens = 60, messages = [{ role = "user", content = "long stream" }] }, background = "long-stream" }
+timeout_ms = 120000
+
+[[step]]
+name = "native-a is unloaded for the long stream"
+console_http = { method = "GET", path = "/api/runtime" }
+poll = true
+timeout_ms = 5000
+expect_not_contains = ['"name":"native-a"']
+
+[[step]]
+name = "let a few tokens through"
+sleep_ms = 3000
+
+[[step]]
+name = "client drops the stream"
+drop_background = "long-stream"
+log_mark = "stream-dropped"
+
+[[step]]
+name = "native request right after the drop"
+openai = { method = "POST", path = "/v1/chat/completions", body = { model = "native-a", max_tokens = 4, messages = [{ role = "user", content = "after drop" }] }, background = "after-drop" }
+timeout_ms = 240000
+
+[[step]]
+name = "its load starts within 8s, not after the remaining ~55s of the stream"
+poll = true
+timeout_ms = 8000
+log_since = "stream-dropped"
+expect_log_contains = ["model_preparation_completed model_id=native-a"]
+
+[[step]]
+name = "native request after the drop answers"
+await_background = "after-drop"
+timeout_ms = 240000
+expect_status = 200
+expect_contains = ['"model":"native-a"']
+
+# --- Virtual model owned by the exclusive plugin -------------------------------------
+
+[[step]]
+name = "virtual model's nested call into the exclusive plugin answers"
+openai = { method = "POST", path = "/v1/chat/completions", body = { model = "dev/virtual-echo", messages = [{ role = "user", content = "nested" }] } }
+timeout_ms = 30000
+expect_status = 200
+log_mark = "virtual"
+
+[[step]]
+name = "nested plugin call took the handoff (native-a unloaded)"
+console_http = { method = "GET", path = "/api/runtime" }
+expect_not_contains = ['"name":"native-a"']
+log_since = "virtual"
+expect_log_not_contains = ["exclusive_gpu handoff failed"]

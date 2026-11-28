@@ -442,12 +442,27 @@ async fn run_single_suite(spec: &SuiteSpec, opts: &SuiteRunOptions) -> Result<Su
     }
     .await;
 
-    let _ = child.kill().await;
-    let _ = timeout(Duration::from_secs(3), child.wait()).await;
+    stop_node(&mut child).await;
     if let (Err(_), Some(dir)) = (&result, &opts.keep_logs) {
         keep_log(dir, &spec.name, &stderr_log);
     }
     result.map(SuiteOutcome::Passed)
+}
+
+/// Stop mesh-llm with SIGTERM so it shuts down cleanly (and an instrumented build
+/// writes its coverage profile); SIGKILL only if it hasn't exited after 15s.
+async fn stop_node(child: &mut tokio::process::Child) {
+    if let Some(pid) = child.id() {
+        let _ = Command::new("kill")
+            .args(["-TERM", &pid.to_string()])
+            .status()
+            .await;
+        if timeout(Duration::from_secs(15), child.wait()).await.is_ok() {
+            return;
+        }
+    }
+    let _ = child.kill().await;
+    let _ = timeout(Duration::from_secs(3), child.wait()).await;
 }
 
 enum SuiteOutcome {
